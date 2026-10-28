@@ -6,6 +6,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { conversationMatches, threadConversationId } from "@t3tools/shared/threadConversations";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -65,7 +66,21 @@ export const layer: Layer.Layer<
     const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
     return ProviderSwitchServiceV2.of({
       plan: Effect.fn("ProviderSwitchService.plan")(
-        function* ({ projection, targetModelSelection }) {
+        function* ({ projection: source, targetModelSelection }) {
+          const providerThreads = source.providerThreads.filter((thread) =>
+            conversationMatches(thread, threadConversationId(source.thread)),
+          );
+          const sessionIds = new Set(providerThreads.map((thread) => thread.providerSessionId));
+          const projection =
+            source.thread.conversations === undefined
+              ? source
+              : {
+                  ...source,
+                  providerThreads,
+                  providerSessions: source.providerSessions.filter((session) =>
+                    sessionIds.has(session.id),
+                  ),
+                };
           const current = projection.thread.modelSelection;
           const instanceChanged = current.instanceId !== targetModelSelection.instanceId;
           const modelChanged = current.model !== targetModelSelection.model;

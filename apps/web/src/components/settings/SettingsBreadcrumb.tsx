@@ -1,3 +1,4 @@
+import { SKILLS_MANAGER_BREADCRUMB_LABELS } from "../../fork/skills-manager/labels";
 import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
@@ -7,6 +8,7 @@ import { SETTINGS_SECTION_LABELS } from "./settingsSearch";
 
 const SETTINGS_BREADCRUMB_LABELS: Readonly<Record<string, string>> = {
   ...SETTINGS_SECTION_LABELS,
+  ...SKILLS_MANAGER_BREADCRUMB_LABELS,
   "/settings/diagnostics": "Diagnostics",
   "/settings/open-source-licenses": "Open source licenses",
 };

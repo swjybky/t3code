@@ -280,7 +280,6 @@ import {
   PanelLayoutControls,
   type PanelLayoutControlsProps,
   RightPanelMaximizeControl,
-  ThreadPanelHeaderControl,
   WorkspaceTitlebarControls,
 } from "./chat/PanelLayoutControls";
 import type { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -2781,6 +2780,7 @@ export default function ChatView(props: ChatViewProps) {
     defaultRuntimeMode,
   });
   const { onSend } = useComposerSend({
+    conversationId: serverProjection?.thread.activeConversationId ?? "default",
     environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
@@ -3156,7 +3156,6 @@ export default function ChatView(props: ChatViewProps) {
       showThreadPanelControl={!inlineRightPanelOwnsTitleBar}
     />
   );
-  const threadPanelHeaderControl = <ThreadPanelHeaderControl {...panelToggleControlProps} />;
   const panelLayoutControls = (
     <WorkspaceTitlebarControls
       showMaximizeControl={!shouldUsePlanSidebarSheet}
@@ -3216,7 +3215,6 @@ export default function ChatView(props: ChatViewProps) {
             />
           ) : null}
           {!rightPanelControlsAtRoot && !rightPanelControlsInPanel ? panelLayoutControls : null}
-          {inlineRightPanelOwnsTitleBar ? threadPanelHeaderControl : null}
           <ChatHeader
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadId={activeThread.id}
@@ -3227,6 +3225,15 @@ export default function ChatView(props: ChatViewProps) {
             parentThreadLink={headerParentThreadLink}
             onOpenThread={onOpenRelatedThreadStable}
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
+            threadPanelControl={
+              inlineRightPanelOwnsTitleBar ? (
+                <PanelLayoutControls
+                  {...panelToggleControlProps}
+                  showTerminalControl={false}
+                  showRightPanelControl={false}
+                />
+              ) : null
+            }
             onNewThreadInProject={handleNewThreadInActiveProjectStable}
             {...(activeDraftLogicalProjectKey
               ? { onOpenProjectSettings: handleOpenDraftProjectSettingsStable }

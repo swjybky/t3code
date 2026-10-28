@@ -159,6 +159,7 @@ type UsageLimitsPanel = ReturnType<typeof useUsageLimitsPanel>;
 type TimelineFollow = ReturnType<typeof useTimelineFollow>;
 
 interface ComposerSendInput {
+  readonly conversationId: string;
   readonly environmentId: EnvironmentId;
   readonly routeThreadKey: string;
   readonly currentRouteThreadKeyRef: { readonly current: string | null };
@@ -402,6 +403,7 @@ export function useComposerSend(input: ComposerSendInput) {
     },
   ) => {
     e?.preventDefault();
+    const expectedConversationId = isServerThread ? input.conversationId : undefined;
     // What the user pressed send on; uploads below can take a while, and a redirect must not
     // decline approvals for a draft that changed meanwhile.
     const promptAtSend = promptRef.current;
@@ -1226,6 +1228,7 @@ export function useComposerSend(input: ComposerSendInput) {
         environmentId,
         input: {
           threadId: threadIdForSend,
+          ...(expectedConversationId === undefined ? {} : { expectedConversationId }),
           message: {
             messageId: newMessageId(),
             role: "user",
@@ -1284,6 +1287,7 @@ export function useComposerSend(input: ComposerSendInput) {
         environmentId,
         input: {
           threadId: threadIdForSend,
+          ...(expectedConversationId === undefined ? {} : { expectedConversationId }),
           message: {
             messageId: messageIdForSend,
             role: "user",

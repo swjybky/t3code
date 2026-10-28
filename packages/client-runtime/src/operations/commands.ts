@@ -163,6 +163,7 @@ interface StartThreadBootstrap {
 }
 
 export interface StartThreadTurnInput extends ThreadCommandInput {
+  readonly expectedConversationId?: string;
   readonly manualContinuationOfRunId?: RunId;
   readonly message: {
     readonly messageId: MessageId;
@@ -731,6 +732,9 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
   if (requestedMode === "start") {
     return yield* dispatch({
       type: "message.dispatch",
+      ...(input.expectedConversationId === undefined
+        ? {}
+        : { expectedConversationId: input.expectedConversationId }),
       commandId,
       createdBy: "user",
       creationSource: input.creationSource ?? "web",
@@ -798,6 +802,9 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
     (serverResolvesCommandContext || projection?.messages.length === 0);
   return yield* dispatch({
     type: "message.dispatch",
+    ...(input.expectedConversationId === undefined
+      ? {}
+      : { expectedConversationId: input.expectedConversationId }),
     commandId,
     createdBy: "user",
     creationSource: input.creationSource ?? "web",

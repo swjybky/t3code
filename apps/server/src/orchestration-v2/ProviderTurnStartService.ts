@@ -1,4 +1,5 @@
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { ORIGINAL_CONVERSATION_ID, projectConversation } from "@t3tools/shared/threadConversations";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   CommandId,
@@ -302,7 +303,11 @@ export const layer: Layer.Layer<
       readonly willRetry?: boolean;
     }) {
       const { runId } = input;
-      const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      const allConversations = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      const conversationId =
+        allConversations.runs.find((run) => run.id === runId)?.conversationId ??
+        ORIGINAL_CONVERSATION_ID;
+      const projection = projectConversation(allConversations, conversationId);
       const run = projection.runs.find((candidate) => candidate.id === runId);
       if (run === undefined) {
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
@@ -489,7 +494,19 @@ export const layer: Layer.Layer<
       );
       if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
         const isEmptyCompaction =
-          message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
+          message.text.trim().toLowerCase() === "/compact" &&
+          !(projection.thread.conversations === undefined
+            ? projection.hasConversation
+            : projection.runs.some((source) => {
+                const prompt = projection.messages.find(
+                  (candidate) => candidate.id === source.userMessageId,
+                );
+                return (
+                  prompt === undefined ||
+                  prompt.text.trim().toLowerCase() !== "/compact" ||
+                  prompt.attachments.length > 0
+                );
+              }));
         // Preparation may select a new provider; account commands still target the last native session.
         const nativeThreads = new Map(
           projection.providerThreads
@@ -1007,7 +1024,7 @@ export const layer: Layer.Layer<
             runs: projection.runs,
             items: (yield* projectionStore.getTurnStartHistory(input.threadId)).filter(
               (item) =>
-                item.runId === null ||
+                (item.runId === null && conversationId === ORIGINAL_CONVERSATION_ID) ||
                 projection.runs.some(
                   (source) => source.id === item.runId && source.ordinal < run.ordinal,
                 ),
@@ -1254,6 +1271,7 @@ export const layer: Layer.Layer<
         providerInstanceId: run.providerInstanceId,
         providerSessionId,
         appThreadId: projection.thread.id,
+        conversationId,
         ownerNodeId: providerThread.ownerNodeId,
         firstRunOrdinal: providerThread.firstRunOrdinal ?? run.ordinal,
         lastRunOrdinal: run.ordinal,

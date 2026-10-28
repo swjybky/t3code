@@ -1,10 +1,11 @@
 import { createRouter, RouterHistory } from "@tanstack/react-router";
 
+import { attachSkillsManagerRoute } from "./fork/skills-manager/attachRoute";
 import { routeTree } from "./routeTree.gen";
 
 export function getRouter(history: RouterHistory) {
   return createRouter({
-    routeTree,
+    routeTree: attachSkillsManagerRoute(routeTree),
     history,
     context: {},
     defaultPreload: "intent",

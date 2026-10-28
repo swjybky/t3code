@@ -14,6 +14,7 @@ const {
   mkdirSyncMock,
   writeFileSyncMock,
   copyFileSyncMock,
+  existsSyncMock,
   execFileSyncMock,
   readFileSyncMock,
 } = vi.hoisted(() => ({
@@ -25,6 +26,7 @@ const {
   mkdirSyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
   copyFileSyncMock: vi.fn(),
+  existsSyncMock: vi.fn((_candidate: string) => false),
   execFileSyncMock: vi.fn(),
   readFileSyncMock: vi.fn(),
 }));
@@ -48,6 +50,7 @@ vi.mock("electron", () => ({
 
 vi.mock("node:fs", () => ({
   readFileSync: readFileSyncMock,
+  existsSync: existsSyncMock,
   mkdirSync: mkdirSyncMock,
   writeFileSync: writeFileSyncMock,
   copyFileSync: copyFileSyncMock,
@@ -60,6 +63,29 @@ vi.mock("node:child_process", () => ({
 import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
 
 describe("DesktopPreReadyPlatform", () => {
+  it("resolves the black icon from the checkout that launched Electron", () => {
+    assert.equal(
+      DesktopPreReadyPlatform.resolveDevelopmentLinuxIconSource({
+        argv: ["electron", "--t3code-dev-root=/repo/apps/desktop", "dist-electron/main.cjs"],
+        cwd: "/somewhere",
+      }),
+      "/repo/assets/prod/black-universal-1024.png",
+    );
+    assert.equal(
+      DesktopPreReadyPlatform.resolveDevelopmentLinuxIconSource({
+        argv: ["electron", "dist-electron/main.cjs"],
+        cwd: "/repo/apps/desktop",
+      }),
+      "/repo/assets/prod/black-universal-1024.png",
+    );
+    assert.isUndefined(
+      DesktopPreReadyPlatform.resolveDevelopmentLinuxIconSource({
+        argv: ["electron"],
+        cwd: "/tmp",
+      }),
+    );
+  });
+
   beforeEach(() => {
     appendSwitchMock.mockReset();
     getSwitchValueMock.mockReset();
@@ -69,6 +95,7 @@ describe("DesktopPreReadyPlatform", () => {
     mkdirSyncMock.mockReset();
     writeFileSyncMock.mockReset();
     copyFileSyncMock.mockReset();
+    existsSyncMock.mockReset().mockReturnValue(false);
     execFileSyncMock.mockReset();
     readFileSyncMock.mockReset().mockReturnValue("{}");
   });
@@ -164,6 +191,77 @@ describe("DesktopPreReadyPlatform", () => {
         assert.isTrue(identity.iconInstalled);
       }),
     ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
+  });
+
+  it.effect("keeps the early source-launch entry pointed at this checkout", () => {
+    vi.stubEnv("VITE_DEV_SERVER_URL", "http://127.0.0.1:5733");
+    vi.stubEnv("T3CODE_PORT", "13773");
+    vi.stubEnv("XDG_DATA_HOME", "/xdg");
+    vi.stubEnv("APPIMAGE", "");
+    vi.stubEnv("T3CODE_DESKTOP_LAUNCHER_PATH", "");
+    getSwitchValueMock.mockReturnValue("");
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        yield* Layer.build(
+          DesktopPreReadyPlatform.layer.pipe(
+            Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
+          ),
+        );
+        const entry = writeFileSyncMock.mock.calls.find(
+          ([path]) => path === "/xdg/applications/com.t3tools.T3Code.Development.desktop",
+        )?.[1];
+        assert.include(
+          entry,
+          "Exec=env VITE_DEV_SERVER_URL=http://127.0.0.1:5733 T3CODE_PORT=13773 ",
+        );
+        assert.include(entry, `${process.execPath} `);
+        assert.include(entry, "NoDisplay=false");
+        assert.include(entry, "StartupWMClass=t3code-dev");
+        assert.notInclude(entry, "Exec=" + process.execPath);
+      }),
+    ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
+  });
+
+  it.effect("publishes the black icon on the development launcher before the dock maps it", () => {
+    vi.stubEnv("VITE_DEV_SERVER_URL", "http://127.0.0.1:5733");
+    vi.stubEnv("XDG_DATA_HOME", "/xdg");
+    vi.stubEnv("APPIMAGE", "");
+    vi.stubEnv("T3CODE_DESKTOP_LAUNCHER_PATH", "");
+    getSwitchValueMock.mockReturnValue("");
+    const argv = process.argv;
+    process.argv = [...argv, "--t3code-dev-root=/repo/apps/desktop"];
+    existsSyncMock.mockImplementation(
+      (candidate: string) => candidate === "/repo/assets/prod/black-universal-1024.png",
+    );
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        yield* Layer.build(
+          DesktopPreReadyPlatform.layer.pipe(
+            Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
+          ),
+        );
+        const entry = writeFileSyncMock.mock.calls.find(
+          ([path]) => path === "/xdg/applications/com.t3tools.T3Code.Development.desktop",
+        )?.[1];
+        assert.include(entry, "Icon=/xdg/icons/com.t3tools.T3Code.Development.desktop.png");
+        assert.include(entry, "StartupWMClass=t3code-dev");
+        assert.deepEqual(copyFileSyncMock.mock.calls, [
+          [
+            "/repo/assets/prod/black-universal-1024.png",
+            "/xdg/icons/com.t3tools.T3Code.Development.desktop.png",
+          ],
+        ]);
+      }),
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          process.argv = argv;
+          vi.unstubAllEnvs();
+        }),
+      ),
+    );
   });
 
   it.effect("points the early portal entry at a configured distribution launcher", () => {

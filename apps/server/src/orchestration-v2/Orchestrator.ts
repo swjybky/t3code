@@ -5,6 +5,14 @@ import type {
   OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
 import {
+  conversationHasStarted,
+  conversationMatches,
+  conversationSwitchBlocked,
+  ORIGINAL_CONVERSATION_ID,
+  projectConversation,
+  threadConversationId,
+} from "@t3tools/shared/threadConversations";
+import {
   latestExecutedRun,
   latestRootProviderFailure,
   runRanAfter,
@@ -1487,7 +1495,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       },
     ) {
       if (!(yield* projectionStore.canStartQueuedRun(threadId))) return;
-      const projection = yield* readCommandProjection(threadId);
+      const allConversations = yield* readCommandProjection(threadId);
+      const projection = projectConversation(allConversations);
       if (
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
@@ -1576,7 +1585,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           turnItemTypes: ["user_message", "notification"],
           turnItemRunIds: newerRunIds,
         })).turnItems.length > 0;
-      const ordinal = startedAhead ? nextRunOrdinal(projection) : queuedRun.ordinal;
+      const ordinal = startedAhead ? nextRunOrdinal(allConversations) : queuedRun.ordinal;
       const rootNodeId = queuedRun.rootNodeId;
       const attemptId = queuedRun.activeAttemptId;
       const providerThreadId = queuedRun.providerThreadId;
@@ -1648,6 +1657,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerInstanceId: queuedRun.providerInstanceId,
         providerSessionId: null,
         appThreadId: threadId,
+        conversationId: threadConversationId(projection.thread),
         ownerNodeId: null,
         nativeThreadRef: null,
         nativeConversationHeadRef: null,
@@ -3154,6 +3164,127 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : null;
 
     const now = yield* DateTime.now;
+    let conversationChanges: Partial<OrchestrationV2AppThread> = {};
+    if (command.type === "thread.metadata.update" && command.conversation !== undefined) {
+      const change = command.conversation;
+      const currentId = threadConversationId(thread);
+      const projection = yield* loadProjectionForCommand(command, [
+        "runs",
+        "providerThreads",
+        "subagents",
+        "runtimeRequests",
+      ]);
+      const conversations = thread.conversations ?? [
+        {
+          id: ORIGINAL_CONVERSATION_ID,
+          title: thread.title,
+          createdAt: DateTime.formatIso(thread.createdAt),
+          deletedAt: null,
+        },
+      ];
+      const target = conversations.find(
+        (conversation) => conversation.id === change.conversationId,
+      );
+      const invalidTarget =
+        change.type === "create"
+          ? target !== undefined
+          : target === undefined ||
+            (change.type === "restore" ? target.deletedAt == null : target.deletedAt != null);
+      if (
+        (change.type !== "restore" && change.expectedConversationId !== currentId) ||
+        invalidTarget
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "对话已发生变化，请刷新后重试。",
+        });
+      }
+      if (change.type !== "restore" && conversationSwitchBlocked(projection)) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "请先停止或完成当前任务，再管理对话。",
+        });
+      }
+      if (isProviderNativeSubagentThread(thread) || thread.archivedAt !== null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "当前线程无法管理对话。",
+        });
+      }
+      if (change.type === "create" && !conversationHasStarted(projection)) return;
+      let nextConversations = conversations;
+      let nextConversationId = currentId;
+      switch (change.type) {
+        case "create":
+          nextConversationId = change.conversationId;
+          nextConversations = [
+            ...conversations,
+            {
+              id: nextConversationId,
+              title: `对话 ${conversations.length + 1}`,
+              createdAt: DateTime.formatIso(now),
+              deletedAt: null,
+            },
+          ];
+          break;
+        case "select":
+          nextConversationId = change.conversationId;
+          break;
+        case "delete":
+          nextConversations = conversations.map((conversation) =>
+            conversation.id === change.conversationId
+              ? { ...conversation, deletedAt: DateTime.formatIso(now) }
+              : conversation,
+          );
+          if (change.conversationId === currentId) {
+            const remaining = nextConversations.findLast(
+              (conversation) => conversation.deletedAt == null,
+            );
+            nextConversationId = remaining?.id ?? `conversation:${command.commandId}`;
+            if (remaining === undefined) {
+              nextConversations = [
+                ...nextConversations,
+                {
+                  id: nextConversationId,
+                  title: "新对话",
+                  createdAt: DateTime.formatIso(now),
+                  deletedAt: null,
+                },
+              ];
+            }
+          }
+          break;
+        case "restore":
+          nextConversations = conversations.map((conversation) =>
+            conversation.id === change.conversationId
+              ? { ...conversation, deletedAt: null }
+              : conversation,
+          );
+          break;
+      }
+      const previousRun = projection.runs.findLast((run) =>
+        conversationMatches(run, nextConversationId),
+      );
+      conversationChanges = {
+        conversations: nextConversations,
+        ...(nextConversationId === currentId
+          ? {}
+          : {
+              activeConversationId: nextConversationId,
+              activeProviderThreadId: previousRun?.providerThreadId ?? null,
+              limitRecovery: null,
+              ...(previousRun === undefined
+                ? {}
+                : {
+                    modelSelection: previousRun.modelSelection,
+                    providerInstanceId: previousRun.providerInstanceId,
+                  }),
+            }),
+      };
+    }
     if (command.type === "thread.metadata.update" && command.limitRecovery != null) {
       const projection = yield* loadProjectionForCommand(
         command,
@@ -3383,6 +3514,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   };
           return {
             ...thread,
+            ...conversationChanges,
             ...(command.title === undefined ? {} : { title: command.title }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
@@ -4686,6 +4818,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               providerInstanceId: input.modelSelection.instanceId,
               providerSessionId: targetProviderSessionId,
               appThreadId: input.command.threadId,
+              conversationId: threadConversationId(input.projection.thread),
               ownerNodeId: null,
               nativeThreadRef: null,
               nativeConversationHeadRef: null,
@@ -4721,7 +4854,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           toProviderInstanceId: input.modelSelection.instanceId,
           coveredRunOrdinals: { from: 1, to: targetRun.ordinal },
           strategy: "full_thread_summary",
-          items: yield* readHandoffItems(input.command.threadId),
+          items: yield* readHandoffItems(
+            input.command.threadId,
+            input.projection.runs.map((run) => run.id),
+          ),
           runs: input.projection.runs,
           createdAt: now,
         })
@@ -5003,7 +5139,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
-    let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+    const allConversations = yield* getProjectionWithPendingEvents(command.threadId, events);
+    if (
+      command.expectedConversationId !== undefined &&
+      command.expectedConversationId !== threadConversationId(allConversations.thread)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "对话已切换，请确认当前对话后重新发送。",
+      });
+    }
+    const nextOrdinal = nextRunOrdinal(allConversations);
+    let projection = projectConversation(allConversations);
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -5147,7 +5295,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: thread,
       });
-      projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      projection = projectConversation(
+        yield* getProjectionWithPendingEvents(command.threadId, events),
+      );
     }
     // Background wakes and delegated completions continue work the user already snoozed, so
     // only a message someone actually sent ends the snooze.
@@ -5171,12 +5321,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: thread,
       });
-      projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      projection = projectConversation(
+        yield* getProjectionWithPendingEvents(command.threadId, events),
+      );
     }
     const userMessages = projection.messages.filter((message) => message.role === "user");
     const onlyMaintenanceHistory =
       userMessages.length > 0 && userMessages.every(isNativeMaintenanceCommand);
     if (
+      projection.thread.conversations !== undefined &&
+      projection.runs.length === 0 &&
+      command.text.trim().length > 0
+    ) {
+      const now = yield* DateTime.now;
+      const conversationId = threadConversationId(projection.thread);
+      const title = command.text.trim().replace(/\s+/gu, " ").slice(0, 80);
+      const thread = {
+        ...projection.thread,
+        conversations: projection.thread.conversations.map((conversation) =>
+          conversation.id === conversationId ? { ...conversation, title } : conversation,
+        ),
+        updatedAt: now,
+      };
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: command.threadId,
+        occurredAt: now,
+        payload: thread,
+      });
+      projection = { ...projection, thread };
+    }
+    if (
+      projection.thread.conversations === undefined &&
       !isNativeMaintenanceCommand(command) &&
       ((command.titleSeed !== undefined &&
         (yield* projectionStore
@@ -5208,7 +5387,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           messageId: command.messageId,
         }),
       ]);
-      projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      projection = projectConversation(
+        yield* getProjectionWithPendingEvents(command.threadId, events),
+      );
     }
     const modelSelection = command.modelSelection ?? projection.thread.modelSelection;
     let dispatchMode = resolveMessageDispatchIntent(
@@ -5535,7 +5716,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const now = yield* DateTime.now;
-      const ordinal = nextRunOrdinal(projection);
+      const ordinal = nextOrdinal;
       const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
       const targetProviderThread =
         modelSelection.instanceId === queueProviderThread.providerInstanceId
@@ -5571,6 +5752,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerInstanceId: modelSelection.instanceId,
         providerSessionId: null,
         appThreadId: command.threadId,
+        conversationId: threadConversationId(projection.thread),
         ownerNodeId: null,
         nativeThreadRef: null,
         nativeConversationHeadRef: null,
@@ -5626,6 +5808,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const run: OrchestrationV2Run = {
         id: runId,
         threadId: command.threadId,
+        conversationId: threadConversationId(projection.thread),
         ordinal,
         providerInstanceId: modelSelection.instanceId,
         modelSelection,
@@ -5852,11 +6035,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
     }
-    const ordinal = nextRunOrdinal(projection);
+    const ordinal = nextOrdinal;
     const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
     const latestCompletedRun = projection.runs.findLast((run) => run.status === "completed");
     const latestHandoffRun = projection.runs.findLast(isHandoffSourceRun);
     const legacyImportItems =
+      threadConversationId(projection.thread) === ORIGINAL_CONVERSATION_ID &&
       projection.thread.historyOrigin === "v1_import"
         ? yield* readHandoffItems(command.threadId, [null])
         : [];
@@ -5938,6 +6122,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               providerInstanceId: modelSelection.instanceId,
               providerSessionId,
               appThreadId: command.threadId,
+              conversationId: threadConversationId(projection.thread),
               ownerNodeId: null,
               nativeThreadRef: null,
               nativeConversationHeadRef: null,
@@ -5987,6 +6172,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const run: OrchestrationV2Run = {
         id: runId,
         threadId: command.threadId,
+        conversationId: threadConversationId(projection.thread),
         ordinal,
         providerInstanceId: modelSelection.instanceId,
         modelSelection,
@@ -6359,6 +6545,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             providerInstanceId: modelSelection.instanceId,
             providerSessionId,
             appThreadId: command.threadId,
+            conversationId: threadConversationId(projection.thread),
             ownerNodeId: null,
             nativeThreadRef: null,
             nativeConversationHeadRef: null,
@@ -6389,9 +6576,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? []
         : yield* readHandoffItems(sourceProjection.thread.id, [
             ...sourceProjection.runs
-              .filter((run) => run.ordinal <= sourceRun.ordinal)
+              .filter(
+                (run) =>
+                  run.ordinal <= sourceRun.ordinal &&
+                  conversationMatches(run, sourceRun.conversationId ?? ORIGINAL_CONVERSATION_ID),
+              )
               .map((run) => run.id),
-            ...(sourceProjection.thread.historyOrigin === "v1_import" ? [null] : []),
+            ...(sourceProjection.thread.historyOrigin === "v1_import" &&
+            (sourceRun.conversationId ?? ORIGINAL_CONVERSATION_ID) === ORIGINAL_CONVERSATION_ID
+              ? [null]
+              : []),
           ]);
     const portableForkHandoff =
       !requiresPortableFork ||
@@ -6674,6 +6868,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const run: OrchestrationV2Run = {
       id: runId,
       threadId: command.threadId,
+      conversationId: threadConversationId(projection.thread),
       ordinal,
       providerInstanceId: modelSelection.instanceId,
       modelSelection,
@@ -12876,6 +13071,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.background-work.settle" ||
           command.type === "thread.stop" ||
           command.type === "subagent.stop" ||
+          (command.type === "thread.metadata.update" && command.conversation?.type === "create") ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close",
         (_planned) =>

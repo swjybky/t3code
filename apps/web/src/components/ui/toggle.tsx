@@ -1,3 +1,5 @@
+import { mergeProps } from "@base-ui/react/merge-props";
+import { useRender } from "@base-ui/react/use-render";
 import { Toggle as TogglePrimitive } from "@base-ui/react/toggle";
 import { cva, type VariantProps } from "class-variance-authority";
 
@@ -48,6 +50,24 @@ function Toggle({
       {...props}
     />
   );
+}
+
+export function ToolbarButton({
+  render,
+  pressed = false,
+  ...props
+}: useRender.ComponentProps<"button"> & { pressed?: boolean }) {
+  const defaultProps = {
+    type: "button" as const,
+    className: toggleVariants({ variant: "ghost", size: "sm" }),
+    "data-slot": "toolbar-button",
+    "data-pressed": pressed ? "" : undefined,
+  };
+  return useRender({
+    defaultTagName: "button",
+    render,
+    props: mergeProps<"button">(defaultProps, props),
+  });
 }
 
 export { Toggle, toggleVariants };

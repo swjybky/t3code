@@ -65,6 +65,30 @@ function deadSessionRecord(
   };
 }
 
+it.effect("does not reuse another conversation's live session", () =>
+  Effect.gen(function* () {
+    const service = yield* ProviderSwitch.ProviderSwitchServiceV2;
+    const source = projection();
+    const result = yield* service.plan({
+      projection: {
+        ...source,
+        thread: {
+          ...source.thread,
+          activeConversationId: "second",
+          conversations: [
+            { id: "default", title: "Original", createdAt: DateTime.formatIso(now) },
+            { id: "second", title: "Second", createdAt: DateTime.formatIso(now) },
+          ],
+        },
+      },
+      targetModelSelection: source.thread.modelSelection,
+    });
+    assert.equal(result.transition.type, "create_with_handoff");
+    assert.isNull(result.targetProviderThreadId);
+    assert.deepEqual(result.releaseProviderSessionIds, []);
+  }).pipe(Effect.provide(layerTest({ [currentInstanceId]: { continuationKey: "codex" } }))),
+);
+
 function layerTest(
   metadata: Readonly<Record<string, { continuationKey: string }>>,
   planSelectionTransition: ProviderAdapter.ProviderAdapterV2["Service"]["planSelectionTransition"] = () =>

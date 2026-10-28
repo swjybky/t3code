@@ -11,12 +11,92 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopAppBranding } from "./DesktopEnvironment.ts";
-import { renderUrlHandlerDesktopEntry } from "./DesktopLinuxUrlHandler.ts";
+import {
+  developmentProtocolLaunch,
+  renderUrlHandlerDesktopEntry,
+} from "./DesktopLinuxUrlHandler.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 
 export interface DesktopPreReadyCommandLineReader {
   readonly hasSwitch: (switchName: string) => boolean;
   readonly getSwitchValue: (switchName: string) => string;
+}
+
+function resolveLinuxUrlHandlerExec(isDevelopment: boolean): {
+  readonly execTarget: string;
+  readonly execArguments?: readonly string[];
+} {
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
+  if (isDevelopment && devServerUrl) {
+    try {
+      // This write happens before the single-instance lock. A callback process
+      // must leave the same source launch in place, or the next return is lost.
+      const launch = developmentProtocolLaunch({
+        devServerUrl: new URL(devServerUrl).origin,
+        execPath: process.execPath,
+        cwd: process.cwd(),
+        argv: process.argv,
+        environment: process.env,
+        resolvePath: (cwd, target) => NodePath.resolve(cwd, target),
+      });
+      return { execTarget: launch.execTarget, execArguments: launch.execArguments };
+    } catch {
+      // An unreadable dev server URL keeps the plain executable.
+    }
+  }
+  return {
+    execTarget:
+      process.env.T3CODE_DESKTOP_LAUNCHER_PATH?.trim() ||
+      process.env.APPIMAGE?.trim() ||
+      process.execPath,
+  };
+}
+
+const DEVELOPMENT_LINUX_ICON_NAME = "black-universal-1024.png";
+
+// Electron's binary icon is a gear. The dev dock reads this entry before any window exists.
+export function resolveDevelopmentLinuxIconSource(input: {
+  readonly argv: readonly string[];
+  readonly cwd: string;
+}): string | undefined {
+  const devRootPrefix = "--t3code-dev-root=";
+  const devRoot = input.argv
+    .find((arg) => arg.startsWith(devRootPrefix))
+    ?.slice(devRootPrefix.length)
+    .trim();
+  if (devRoot) {
+    return NodePath.resolve(devRoot, "..", "..", "assets", "prod", DEVELOPMENT_LINUX_ICON_NAME);
+  }
+
+  const mainEntry = input.argv.find(
+    (arg) => arg.endsWith("dist-electron/main.cjs") || arg.endsWith("dist-electron\\main.cjs"),
+  );
+  if (!mainEntry) return undefined;
+  return NodePath.resolve(
+    input.cwd,
+    mainEntry,
+    "..",
+    "..",
+    "..",
+    "..",
+    "assets",
+    "prod",
+    DEVELOPMENT_LINUX_ICON_NAME,
+  );
+}
+
+function resolveLinuxDesktopIconSource(isDevelopment: boolean): string | undefined {
+  if (isDevelopment) {
+    const developmentSource = resolveDevelopmentLinuxIconSource({
+      argv: process.argv,
+      cwd: process.cwd(),
+    });
+    if (developmentSource !== undefined && NodeFS.existsSync(developmentSource)) {
+      return developmentSource;
+    }
+  }
+  if (!Electron.app.isPackaged) return undefined;
+  return NodePath.posix.join(Electron.app.getAppPath(), "apps/desktop/prod-resources/icon.png");
 }
 
 function readCommandLineSwitchValue(
@@ -82,26 +162,23 @@ export const make = Effect.gen(function* () {
           "applications",
         );
         NodeFS.mkdirSync(applicationsDir, { recursive: true });
-        const iconPath = Electron.app.isPackaged
-          ? NodePath.posix.join(
-              applicationsDir,
-              "..",
-              "icons",
-              `${linux.linuxDesktopEntryName}.png`,
-            )
-          : undefined;
-        if (iconPath !== undefined) {
+        const iconSource = resolveLinuxDesktopIconSource(linux.isDevelopment);
+        const iconPath =
+          iconSource === undefined
+            ? undefined
+            : NodePath.posix.join(
+                applicationsDir,
+                "..",
+                "icons",
+                `${linux.linuxDesktopEntryName}.png`,
+              );
+        if (iconSource !== undefined && iconPath !== undefined) {
           try {
             NodeFS.mkdirSync(NodePath.posix.dirname(iconPath), { recursive: true });
-            NodeFS.copyFileSync(
-              NodePath.posix.join(
-                Electron.app.getAppPath(),
-                "apps/desktop/prod-resources/icon.png",
-              ),
-              iconPath,
-            );
+            NodeFS.copyFileSync(iconSource, iconPath);
           } catch {}
         }
+        const launch = resolveLinuxUrlHandlerExec(linux.isDevelopment);
         NodeFS.writeFileSync(
           NodePath.posix.join(applicationsDir, linux.linuxDesktopEntryName),
           renderUrlHandlerDesktopEntry({
@@ -109,12 +186,11 @@ export const make = Effect.gen(function* () {
               isDevelopment: linux.isDevelopment,
               appVersion: Electron.app.getVersion(),
             }).displayName,
-            execTarget:
-              process.env.T3CODE_DESKTOP_LAUNCHER_PATH?.trim() ||
-              process.env.APPIMAGE?.trim() ||
-              process.execPath,
+            execTarget: launch.execTarget,
+            ...(launch.execArguments === undefined ? {} : { execArguments: launch.execArguments }),
             scheme: ElectronProtocol.getDesktopScheme(linux.isDevelopment),
             ...(iconPath === undefined ? {} : { iconPath }),
+            ...(linux.isDevelopment ? { visible: true, startupWmClass: linux.linuxWmClass } : {}),
           }),
           "utf8",
         );

@@ -1493,6 +1493,7 @@ html[data-theme-id] [data-chat-header] [data-toolbar-control] {
    the panel opens. They only take the themed foreground; hover and pressed
    keep the base ghost accent. The tooltip trigger's data-slot wins over the
    toggle's when the trigger renders the toggle, so match both. */
+html[data-theme-id] [data-panel-layout-controls] [data-slot="toolbar-button"],
 html[data-theme-id] [data-panel-layout-controls] [data-slot="toggle"],
 html[data-theme-id] [data-panel-layout-controls] [data-slot="tooltip-trigger"],
 html[data-theme-id] [data-workspace-titlebar-controls] [data-slot="toggle"],
@@ -1501,6 +1502,7 @@ html[data-theme-id] [data-workspace-titlebar-controls] [data-slot="tooltip-trigg
   color: var(--contrast-toolbar-foreground);
 }
 
+html[data-theme-id] [data-panel-layout-controls] [data-slot="toolbar-button"]:disabled,
 html[data-theme-id] [data-panel-layout-controls] [data-slot="toggle"]:disabled,
 html[data-theme-id] [data-panel-layout-controls] [data-slot="tooltip-trigger"]:disabled,
 html[data-theme-id] [data-workspace-titlebar-controls] [data-slot="toggle"]:disabled,

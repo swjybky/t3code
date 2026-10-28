@@ -362,6 +362,51 @@ const deleted = (sequence = 3): OrchestrationV2ThreadStreamItem => {
 };
 
 describe("EnvironmentThreads", () => {
+  it.effect("reloads bounded history after another client selects a conversation", () =>
+    Effect.gen(function* () {
+      const selected = {
+        ...BASE_PROJECTION,
+        thread: {
+          ...BASE_PROJECTION.thread,
+          activeConversationId: "second",
+          conversations: ["default", "second"].map((id) => ({
+            id,
+            title: id,
+            createdAt: DateTime.formatIso(BASE_PROJECTION.updatedAt),
+          })),
+        },
+      };
+      const h = yield* makeHarness({
+        cached: BASE_PROJECTION,
+        cachedHistory: { historyCursor: "old-conversation", hasMoreHistory: true },
+        httpSnapshot: {
+          _tag: "present",
+          snapshot: { snapshotSequence: 8, projection: selected },
+          history: { historyCursor: "selected-conversation", hasMoreHistory: true },
+        },
+      });
+      yield* awaitThreadState(h.observed, (state) => Option.isSome(state.data));
+      yield* Queue.offer(h.inputs, {
+        kind: "event",
+        sequence: 8,
+        event: {
+          id: EventId.make("conversation-selected"),
+          type: "thread.metadata-updated",
+          threadId: THREAD_ID,
+          occurredAt: BASE_PROJECTION.updatedAt,
+          payload: selected.thread,
+        },
+      });
+      const state = yield* awaitThreadState(
+        h.observed,
+        (value) => value.history.historyCursor === "selected-conversation",
+      );
+      expect(Option.getOrThrow(state.data)).toEqual(selected);
+      expect(state.history.expanded).toBe(false);
+      expect(yield* Ref.get(h.loaderCalls)).toBe(1);
+    }),
+  );
+
   it.effect("discards an oversized version-4 cache and requests a fresh bounded snapshot", () =>
     Effect.gen(function* () {
       const item: OrchestrationV2TurnItem = {

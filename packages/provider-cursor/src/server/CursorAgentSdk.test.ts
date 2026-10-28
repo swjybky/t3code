@@ -1,7 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import { vi } from "vite-plus/test";
 
@@ -14,6 +16,8 @@ const cursorSdkMock = vi.hoisted(() => {
   const runOperations: Array<string> = [];
   let agentCloseFailure: unknown;
   let staleRunActive = false;
+  let hangSend = false;
+  let notifySendEntered: (() => void) | undefined;
   const runWait = vi.fn(async () => ({
     id: "run-cursor-agent-sdk-test",
     requestId: "request-cursor-agent-sdk-test",
@@ -35,6 +39,10 @@ const cursorSdkMock = vi.hoisted(() => {
       options: { readonly onDelta?: (input: { readonly update: unknown }) => Promise<void> },
     ) => {
       runOperations.push("run.start");
+      notifySendEntered?.();
+      if (hangSend) {
+        return new Promise(() => {});
+      }
       if (staleRunActive) {
         throw new Error("Agent agent-cursor-agent-sdk-test already has active run");
       }
@@ -65,7 +73,7 @@ const cursorSdkMock = vi.hoisted(() => {
   const listRuns = vi.fn(async () => {
     runOperations.push("agent.listRuns");
     return {
-      items: staleRunActive ? [{ id: "run-stale", status: "running" }] : [],
+      items: staleRunActive || hangSend ? [{ id: "run-stale", status: "running" }] : [],
     };
   });
   const cancelRun = vi.fn(async () => {
@@ -86,6 +94,12 @@ const cursorSdkMock = vi.hoisted(() => {
     send,
     setAgentCloseFailure: (failure: unknown) => {
       agentCloseFailure = failure;
+    },
+    setHangSend: (hang: boolean) => {
+      hangSend = hang;
+    },
+    setNotifySendEntered: (notify: (() => void) | undefined) => {
+      notifySendEntered = notify;
     },
     setStaleRunActive: (active: boolean) => {
       staleRunActive = active;
@@ -171,5 +185,79 @@ describe("CursorAgentSdkRunner", () => {
         },
       ]);
     }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("cancels an abandoned run on a later send in the same session", () =>
+    Effect.gen(function* () {
+      cursorSdkMock.runOperations.length = 0;
+      cursorSdkMock.listRuns.mockClear();
+      cursorSdkMock.cancelRun.mockClear();
+      cursorSdkMock.setHangSend(false);
+      cursorSdkMock.setStaleRunActive(false);
+
+      const runner = yield* CursorAgentSdk.CursorAgentSdkRunner;
+      const session = yield* runner.open({
+        operation: "create",
+        options: { model: { id: "default" }, mode: "agent", local: { cwd: process.cwd() } },
+        threadId: ThreadId.make("thread-cursor-agent-sdk-create-stale-run-test"),
+        providerSessionId: ProviderSessionId.make(
+          "provider-session-cursor-agent-sdk-create-stale-run-test",
+        ),
+      });
+      yield* (yield* session.send({ message: "first" })).wait;
+      cursorSdkMock.runOperations.length = 0;
+      cursorSdkMock.setStaleRunActive(true);
+      const run = yield* session.send({ message: "again" });
+      yield* run.wait;
+
+      assert.deepStrictEqual(cursorSdkMock.runOperations, [
+        "run.start",
+        "agent.listRuns",
+        "agent.cancelRun",
+        "run.start",
+      ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("cancels the SDK run when send is interrupted before it returns", () =>
+    Effect.gen(function* () {
+      cursorSdkMock.runOperations.length = 0;
+      cursorSdkMock.listRuns.mockClear();
+      cursorSdkMock.cancelRun.mockClear();
+      cursorSdkMock.setStaleRunActive(false);
+      cursorSdkMock.setHangSend(true);
+      const entered = yield* Deferred.make<void>();
+      const context = yield* Effect.context<never>();
+      cursorSdkMock.setNotifySendEntered(() => {
+        void Effect.runPromiseWith(context)(Deferred.succeed(entered, undefined));
+      });
+
+      const runner = yield* CursorAgentSdk.CursorAgentSdkRunner;
+      const session = yield* runner.open({
+        operation: "create",
+        options: { model: { id: "default" }, mode: "agent", local: { cwd: process.cwd() } },
+        threadId: ThreadId.make("thread-cursor-agent-sdk-interrupt-send-test"),
+        providerSessionId: ProviderSessionId.make(
+          "provider-session-cursor-agent-sdk-interrupt-send-test",
+        ),
+      });
+      const fiber = yield* session.send({ message: "hello" }).pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(fiber);
+
+      assert.deepStrictEqual(cursorSdkMock.runOperations, [
+        "run.start",
+        "agent.listRuns",
+        "agent.cancelRun",
+      ]);
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          cursorSdkMock.setHangSend(false);
+          cursorSdkMock.setNotifySendEntered(undefined);
+        }),
+      ),
+      Effect.provide(layerTest),
+    ),
   );
 });

@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 
+import { SkillsManagerNavItem } from "../../fork/skills-manager/SkillsManagerNavItem";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
@@ -399,6 +400,12 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                           </SidebarMenuItem>
                         );
                       })}
+                      {group.heading === "Agents" ? (
+                        <SkillsManagerNavItem
+                          pathname={pathname}
+                          compactSearchOpen={compactSearchOpen}
+                        />
+                      ) : null}
                     </SidebarMenu>
                   </div>
                 ))}

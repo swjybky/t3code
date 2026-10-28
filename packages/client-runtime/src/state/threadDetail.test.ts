@@ -4,11 +4,13 @@ import {
   MessageId,
   RunId,
   TurnItemId,
+  type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import { conversationHasStarted } from "@t3tools/shared/threadConversations";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
@@ -146,6 +148,69 @@ describe("quietThreadAtom", () => {
         ),
     };
   }
+
+  it("shows only the selected conversation and restores retained history", () => {
+    const run = (id: string, ordinal: number, conversationId?: string): OrchestrationV2Run => ({
+      id: RunId.make(id),
+      threadId: v2ThreadId,
+      ...(conversationId === undefined ? {} : { conversationId }),
+      ordinal,
+      providerInstanceId: v2Projection.thread.providerInstanceId,
+      modelSelection: v2Projection.thread.modelSelection,
+      providerThreadId: null,
+      userMessageId: MessageId.make(`message:${id}`),
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: "completed",
+      requestedAt: v2Now,
+      startedAt: v2Now,
+      completedAt: v2Now,
+      checkpointId: null,
+      contextHandoffId: null,
+    });
+    const original = { ...assistant, status: "completed" as const, streaming: false };
+    const second = {
+      ...original,
+      id: TurnItemId.make("second-answer"),
+      runId: RunId.make("run-2"),
+      text: "Independent answer",
+    };
+    const source = {
+      ...v2Projection,
+      thread: {
+        ...v2Projection.thread,
+        activeConversationId: "default",
+        conversations: ["default", "second", "empty"].map((id) => ({
+          id,
+          title: id,
+          createdAt: DateTime.formatIso(v2Now),
+        })),
+      },
+      runs: [run("run-1", 1), run("run-2", 2, "second")],
+      turnItems: [original, second],
+      visibleTurnItems: [original, second].map((item, position) => ({
+        item,
+        position,
+        visibility: "local" as const,
+        sourceThreadId: v2ThreadId,
+        sourceItemId: item.id,
+      })),
+    };
+    using thread = setup(source);
+    const ids = () => thread.read()?.projection.visibleTurnItems.map((row) => row.sourceItemId);
+    expect(ids()).toEqual([original.id]);
+    expect(conversationHasStarted(thread.read()!.projection)).toBe(true);
+    thread.push({ ...source, thread: { ...source.thread, activeConversationId: "empty" } });
+    expect(ids()).toEqual([]);
+    expect(thread.read()?.projection.runs).toEqual([]);
+    expect(conversationHasStarted(thread.read()!.projection)).toBe(false);
+    thread.push({ ...source, thread: { ...source.thread, activeConversationId: "second" } });
+    expect(ids()).toEqual([second.id]);
+    expect(conversationHasStarted(thread.read()!.projection)).toBe(true);
+    expect(thread.read()?.projection.runs.map((row) => row.id)).toEqual([second.runId]);
+    thread.push(source);
+    expect(ids()).toEqual([original.id]);
+  });
 
   it("keeps the same value through streamed text", () => {
     const thread = setup(withItem(assistant));

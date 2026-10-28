@@ -1802,6 +1802,7 @@ export const layerWsRpc = (
           threadSnapshotPagination: true,
           threadFind: true,
           threadFindProgressive: true,
+          threadConversations: true,
           ...Option.match(scratchWorkspaceRoot, {
             onNone: () => ({}),
             onSome: (root) => ({ scratchWorkspaceRoot: root }),

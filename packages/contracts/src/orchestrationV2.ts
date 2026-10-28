@@ -448,6 +448,17 @@ export const OrchestrationV2AppThread = Schema.Struct({
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
+  activeConversationId: Schema.optional(TrimmedNonEmptyString),
+  conversations: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        id: TrimmedNonEmptyString,
+        title: TrimmedNonEmptyString,
+        createdAt: IsoDateTime,
+        deletedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+      }),
+    ),
+  ),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
@@ -666,6 +677,7 @@ export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_pr
 export const OrchestrationV2Run = Schema.Struct({
   id: RunId,
   threadId: ThreadId,
+  conversationId: Schema.optional(TrimmedNonEmptyString),
   ordinal: PositiveInt,
   providerInstanceId: ProviderInstanceId,
   modelSelection: ModelSelection,
@@ -1043,6 +1055,7 @@ export type OrchestrationV2ProviderGoal = typeof OrchestrationV2ProviderGoal.Typ
 
 export const OrchestrationV2ProviderThread = Schema.Struct({
   id: ProviderThreadId,
+  conversationId: Schema.optional(TrimmedNonEmptyString),
   driver: ProviderDriverKind,
   providerInstanceId: ProviderInstanceId,
   providerSessionId: Schema.NullOr(ProviderSessionId),
@@ -3007,6 +3020,13 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.metadata.update"),
     commandId: CommandId,
     threadId: ThreadId,
+    conversation: Schema.optional(
+      Schema.Struct({
+        type: Schema.Literals(["create", "select", "delete", "restore"]),
+        conversationId: TrimmedNonEmptyString,
+        expectedConversationId: TrimmedNonEmptyString,
+      }),
+    ),
     title: Schema.optional(TrimmedNonEmptyString),
     regenerateTitle: Schema.optional(Schema.Boolean),
     branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -3106,6 +3126,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("message.dispatch"),
+    expectedConversationId: Schema.optional(TrimmedNonEmptyString),
     notification: Schema.optional(OrchestrationV2Notification),
     /** Sends this pending guest message; the server uses the guest's text, not `text`. */
     guestMessageId: Schema.optional(GuestMessageId),

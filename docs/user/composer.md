@@ -12,6 +12,21 @@ becomes an attachment when inserting it would exceed the message limit. On a
 hardware keyboard, use `Cmd+Shift+V` on Apple devices or `Ctrl+Shift+V` elsewhere
 to keep a large paste editable in the composer instead.
 
+## Separate conversations in a thread
+
+On web and desktop, use **新建对话 (+)** in the thread header to start with a
+fresh agent context while keeping the same thread, branch, and working directory.
+Use **历史对话** to return to an earlier conversation and continue it. The first
+message names each new conversation; existing messages stay in their original one.
+
+Wait for running work to finish, including background tasks, before creating or
+switching conversations. The selected conversation is shared across connected
+clients. Files are shared between conversations; switching does not undo edits.
+
+You can delete a conversation from **历史对话** and use **撤销** in the notification
+to restore it. Deleting the selected conversation opens another remaining one, or
+a blank conversation if it was the last. Deleting history does not undo file edits.
+
 ## Formatting
 
 The composer writes Markdown and shows it styled as you type. Markers such as

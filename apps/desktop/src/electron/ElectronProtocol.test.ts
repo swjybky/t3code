@@ -20,6 +20,28 @@ import * as ElectronProtocol from "./ElectronProtocol.ts";
 
 const layerProtocol = ElectronProtocol.layer.pipe(Layer.provide(NodeServices.layer));
 
+describe("desktopSchemeForConnectKey", () => {
+  const officialKey = "pk_live_Y2xlcmsudDMuY29kZXMk";
+
+  it("uses the production origin for the official Connect account during development", () => {
+    assert.equal(ElectronProtocol.desktopSchemeForConnectKey(true, officialKey), "t3code");
+  });
+
+  it("keeps the development origin for any other Clerk instance", () => {
+    const otherLiveKey = `pk_live_${btoa("example.clerk.accounts.dev$")}`;
+    assert.equal(
+      ElectronProtocol.desktopSchemeForConnectKey(
+        true,
+        "pk_test_ZXhhbXBsZS5jbGVyay5hY2NvdW50cy5kZXYk",
+      ),
+      "t3code-dev",
+    );
+    assert.equal(ElectronProtocol.desktopSchemeForConnectKey(true, otherLiveKey), "t3code-dev");
+    assert.equal(ElectronProtocol.desktopSchemeForConnectKey(true, undefined), "t3code-dev");
+    assert.equal(ElectronProtocol.desktopSchemeForConnectKey(false, undefined), "t3code");
+  });
+});
+
 describe("ElectronProtocol", () => {
   beforeEach(() => {
     handleMock.mockReset();

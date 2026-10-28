@@ -74,23 +74,75 @@ const escapeUrlHandlerExecTarget = (value: string): string =>
     ? escapeDesktopEntryExecArgument(value)
     : escapeDesktopEntryString(value.replaceAll("%", "%%"));
 
-// The AppImage integration entry owns the window identity. This
-// hidden URL-only entry must not compete with it for StartupWMClass matching.
+function developmentLaunchAssignments(input: {
+  readonly devServerUrl: string;
+  readonly environment?: {
+    readonly T3CODE_PORT?: string | undefined;
+    readonly T3CODE_HOME?: string | undefined;
+  };
+}): readonly string[] {
+  const assignments = [`VITE_DEV_SERVER_URL=${input.devServerUrl}`];
+  for (const name of ["T3CODE_PORT", "T3CODE_HOME"] as const) {
+    const value = input.environment?.[name]?.trim();
+    if (value === undefined || value.length === 0 || /[\r\n\0]/.test(value)) continue;
+    assignments.push(`${name}=${value}`);
+  }
+  return assignments;
+}
+
+export function developmentProtocolLaunch(input: {
+  readonly devServerUrl: string;
+  readonly execPath: string;
+  readonly cwd: string;
+  readonly argv: readonly string[];
+  readonly resolvePath: (cwd: string, target: string) => string;
+  readonly environment?: {
+    readonly T3CODE_PORT?: string | undefined;
+    readonly T3CODE_HOME?: string | undefined;
+  };
+}): {
+  readonly execTarget: string;
+  readonly execArguments: readonly string[];
+} {
+  const args = input.argv.slice(1).flatMap((arg) => {
+    if (arg.includes("://")) return [];
+    if (arg.startsWith("-")) return [arg];
+    return [input.resolvePath(input.cwd, arg)];
+  });
+  return {
+    execTarget: "env",
+    execArguments: [...developmentLaunchAssignments(input), input.execPath, ...args],
+  };
+}
+
 export function renderUrlHandlerDesktopEntry(input: {
   readonly displayName: string;
   readonly execTarget: string;
+  readonly execArguments?: readonly string[];
   readonly scheme: string;
   readonly iconPath?: string;
+  // GNOME's open-with chooser skips NoDisplay entries. A source checkout has no
+  // other launcher, so its handler has to stay listed.
+  readonly visible?: boolean;
+  // The AppImage integration entry owns the window identity. A hidden URL-only
+  // entry must not compete with it. A visible source checkout is the dock identity.
+  readonly startupWmClass?: string;
 }): string {
+  const exec = [input.execTarget, ...(input.execArguments ?? [])]
+    .map((argument) => escapeUrlHandlerExecTarget(argument))
+    .join(" ");
   return [
     "[Desktop Entry]",
     "Type=Application",
     `Name=${escapeDesktopEntryString(input.displayName)}`,
-    `Exec=${escapeUrlHandlerExecTarget(input.execTarget)} %U`,
+    `Exec=${exec} %U`,
     ...(input.iconPath === undefined ? [] : [`Icon=${escapeDesktopEntryString(input.iconPath)}`]),
     "Terminal=false",
-    "NoDisplay=true",
+    input.visible ? "NoDisplay=false" : "NoDisplay=true",
     "StartupNotify=false",
+    ...(input.startupWmClass === undefined
+      ? []
+      : [`StartupWMClass=${escapeDesktopEntryString(input.startupWmClass)}`]),
     `MimeType=x-scheme-handler/${input.scheme};`,
     "",
   ].join("\n");
@@ -99,9 +151,12 @@ export function renderUrlHandlerDesktopEntry(input: {
 // Docks may look up the Wayland app id without a desktop entry; icon theme lookups are case-sensitive.
 const LINUX_THEME_ICON_SIZE = "256x256";
 
-function linuxThemeIconNames(desktopEntryName: string): readonly string[] {
+function linuxThemeIconNames(
+  desktopEntryName: string,
+  extraNames: readonly string[] = [],
+): readonly string[] {
   const appId = desktopEntryName.replace(/\.desktop$/u, "");
-  return [...new Set([appId.toLowerCase(), appId])];
+  return [...new Set([appId.toLowerCase(), appId, ...extraNames])];
 }
 
 const sameBytes = (left: Uint8Array, right: Uint8Array): boolean =>
@@ -136,15 +191,41 @@ export const make = Effect.gen(function* () {
     // T3CODE_DESKTOP_LAUNCHER_PATH, because process.execPath is that Electron.
     // Inside the mounted AppImage, process.execPath points at a transient
     // /tmp/.mount_* path — the handler must launch the AppImage itself.
-    const execTarget = environment.desktopLauncherPath.pipe(
-      Option.orElse(() => environment.appImagePath),
-      Option.getOrElse(() => process.execPath),
-    );
+    const devServerUrl = environment.isDevelopment
+      ? Option.getOrUndefined(environment.devServerUrl ?? Option.none())
+      : undefined;
+    // Unpackaged Electron is only the runtime. A bare relaunch never reaches this checkout,
+    // so the sign-in callback cannot return to the running app.
+    const developmentLaunch =
+      environment.isDevelopment && devServerUrl !== undefined
+        ? developmentProtocolLaunch({
+            devServerUrl: devServerUrl.origin,
+            execPath: process.execPath,
+            cwd: process.cwd(),
+            argv: process.argv,
+            environment: process.env,
+            resolvePath: (cwd, target) =>
+              environment.path.isAbsolute(target) ? target : environment.path.resolve(cwd, target),
+          })
+        : null;
+    const execTarget = developmentLaunch
+      ? developmentLaunch.execTarget
+      : environment.desktopLauncherPath.pipe(
+          Option.orElse(() => environment.appImagePath),
+          Option.getOrElse(() => process.execPath),
+        );
+    const developmentIcon = environment.isDevelopment
+      ? (yield* assets.iconPaths).png
+      : Option.none();
     const content = renderUrlHandlerDesktopEntry({
       displayName: environment.displayName,
       execTarget,
+      ...(developmentLaunch === null ? {} : { execArguments: developmentLaunch.execArguments }),
       scheme,
-      ...(environment.isPackaged ? { iconPath } : {}),
+      ...(environment.isPackaged || Option.isSome(developmentIcon) ? { iconPath } : {}),
+      ...(environment.isDevelopment
+        ? { visible: true, startupWmClass: environment.linuxWmClass }
+        : {}),
     });
     // Avoid truncating the pre-ready entry while the portal may be reading it.
     const existing = yield* fileSystem
@@ -216,12 +297,15 @@ export const make = Effect.gen(function* () {
       .pipe(Effect.map((info) => Option.getOrUndefined(info.mtime)?.getTime() ?? 0));
 
   const installThemeIcons = Effect.gen(function* () {
-    const source = yield* assets.resolveResourcePath(`icons/${LINUX_THEME_ICON_SIZE}.png`);
+    const themeIcon = yield* assets.resolveResourcePath(`icons/${LINUX_THEME_ICON_SIZE}.png`);
+    const universalIcon = (yield* assets.iconPaths).png;
+    const source = Option.isSome(themeIcon) ? themeIcon : universalIcon;
     if (Option.isNone(source)) return;
     const icon = yield* fileSystem.readFile(source.value);
-    const targets = linuxThemeIconNames(environment.linuxDesktopEntryName).map((name) =>
-      environment.path.join(themeIconDir, `${name}.png`),
-    );
+    const targets = linuxThemeIconNames(
+      environment.linuxDesktopEntryName,
+      environment.isDevelopment ? [environment.linuxWmClass] : [],
+    ).map((name) => environment.path.join(themeIconDir, `${name}.png`));
     let changed = false;
     for (const target of targets) {
       const current = yield* fileSystem.readFile(target).pipe(Effect.option);
@@ -289,22 +373,25 @@ export const make = Effect.gen(function* () {
       return;
     }
     yield* writeDesktopEntry;
-    if (!environment.isPackaged) return;
+    // Unpackaged Electron shows its gear until this entry names the real icon.
+    if (environment.isPackaged || environment.isDevelopment) {
+      yield* Effect.gen(function* () {
+        const { png } = yield* assets.iconPaths;
+        if (Option.isNone(png)) return;
+        // The AppImage mount is temporary; the chooser needs the icon after exit.
+        yield* fileSystem.makeDirectory(iconsDir, { recursive: true });
+        yield* fileSystem.copyFile(png.value, iconPath);
+      }).pipe(
+        Effect.catch((error) =>
+          logWarning("URL handler icon copy failed", { iconPath, category: error.reason._tag }),
+        ),
+      );
 
-    yield* Effect.gen(function* () {
-      const { png } = yield* assets.iconPaths;
-      if (Option.isNone(png)) return;
-      // The AppImage mount is temporary; the chooser needs the icon after exit.
-      yield* fileSystem.makeDirectory(iconsDir, { recursive: true });
-      yield* fileSystem.copyFile(png.value, iconPath);
-    }).pipe(
-      Effect.catch((error) =>
-        logWarning("URL handler icon copy failed", { iconPath, category: error.reason._tag }),
-      ),
-    );
+      yield* installThemeIcons;
+    }
 
-    yield* installThemeIcons;
-
+    // GIO only offers handlers recorded in mimeinfo.cache. Skipping this for a
+    // source launch leaves the browser chooser with no application to open.
     yield* updateDesktopDatabase.pipe(
       // GIO verifies scheme associations through mimeinfo.cache. A missing cache updater must not block xdg-mime.
       Effect.catch((error) =>

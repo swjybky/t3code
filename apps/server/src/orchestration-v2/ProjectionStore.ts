@@ -10,6 +10,11 @@ import type {
   OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
 import {
+  conversationMatches,
+  projectConversation,
+  threadConversationId,
+} from "@t3tools/shared/threadConversations";
+import {
   latestRootProviderFailure,
   latestUnheldRun,
   threadErrorSummary,
@@ -642,6 +647,7 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     options: {
       readonly rowLimit: number;
+      readonly conversationId?: string | undefined;
       readonly userTurnLimit?: number | undefined;
       readonly anchorItemId?: TurnItemId | undefined;
       readonly anchorThreadId?: ThreadId | undefined;
@@ -944,6 +950,7 @@ export function applyToProjection(
         ...base,
         thread:
           event.payload.appThreadId === base.thread.id &&
+          conversationMatches(event.payload, threadConversationId(base.thread)) &&
           !isQueuedProviderThreadPlaceholder(event.payload)
             ? {
                 ...base.thread,
@@ -2454,6 +2461,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 const threadRow = threadRows[0];
                 if (threadRow !== undefined) {
                   const thread = yield* decodeThreadPayload(threadRow.payload_json);
+                  if (!conversationMatches(event.payload, threadConversationId(thread))) break;
                   const updatedThread = {
                     ...thread,
                     activeProviderThreadId: event.payload.id,
@@ -2920,6 +2928,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       threadId: ThreadId,
       window: {
         readonly rowLimit: number;
+        readonly conversationId?: string | undefined;
         readonly userTurnLimit?: number | undefined;
         readonly anchorItemId?: TurnItemId | undefined;
         readonly requiredRunId?: RunId | undefined;
@@ -2932,6 +2941,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   LEFT JOIN orchestration_v2_projection_runs AS run
                     ON run.run_id = item.run_id
                   WHERE item.thread_id = ${threadId}
+                    ${window.conversationId === undefined ? sql`` : sql`AND COALESCE(json_extract(run.payload_json, '$.conversationId'), 'default') = ${window.conversationId}`}
                     AND item.ordinal <= COALESCE(
                       (
                         SELECT ordinal
@@ -3097,6 +3107,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     WHERE thread_id = ${threadId}
                       AND ${window.anchorItemId ?? null} IS NULL
                       AND ${window.requiredRunId ?? null} IS NULL
+                      ${
+                        window.conversationId === undefined
+                          ? sql``
+                          : sql`AND (
+                        run_id IN (
+                          SELECT run_id FROM orchestration_v2_projection_runs
+                          WHERE thread_id = ${threadId}
+                            AND COALESCE(json_extract(payload_json, '$.conversationId'), 'default') = ${window.conversationId}
+                        ) OR (run_id IS NULL AND ${window.conversationId} = 'default')
+                      )`
+                      }
                     ORDER BY ordinal DESC, turn_item_id DESC
                     LIMIT 1
                   ) AS latest
@@ -3109,6 +3130,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         threadId: ThreadId,
         window?: {
           readonly rowLimit: number;
+          readonly conversationId?: string | undefined;
           readonly userTurnLimit?: number | undefined;
           readonly anchorItemId?: TurnItemId | undefined;
           readonly requiredRunId?: RunId | undefined;
@@ -3680,6 +3702,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       seenThreadIds: ReadonlySet<ThreadId>,
       window?: {
         readonly rowLimit: number;
+        readonly conversationId?: string | undefined;
         readonly userTurnLimit?: number | undefined;
         readonly anchorItemId?: TurnItemId | undefined;
         readonly requiredRunId?: RunId | undefined;
@@ -3696,6 +3719,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         seenThreadIds: ReadonlySet<ThreadId>,
         window?: {
           readonly rowLimit: number;
+          readonly conversationId?: string | undefined;
           readonly userTurnLimit?: number | undefined;
           readonly anchorItemId?: TurnItemId | undefined;
           readonly requiredRunId?: RunId | undefined;
@@ -3718,6 +3742,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             : undefined,
         );
         const forkedFrom = projection.thread.forkedFrom;
+        if (window?.conversationId !== undefined && window.conversationId !== "default")
+          return withLocalVisibleTurnItems(projection);
         if (forkedFrom?.type !== "run" || seenThreadIds.has(forkedFrom.threadId)) {
           return withLocalVisibleTurnItems(projection);
         }
@@ -5010,6 +5036,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                SELECT provider_thread_id FROM orchestration_v2_projection_provider_threads
                WHERE thread_id = ${threadId} AND owner_node_id IS NULL
                  AND provider_instance_id = ${targetInstanceId}
+                 AND COALESCE(json_extract(payload_json, '$.conversationId'), 'default') = ${threadConversationId(thread)}
                ORDER BY updated_at DESC, provider_thread_id ASC LIMIT 1
              )
           ORDER BY updated_at ASC, provider_thread_id ASC
@@ -5584,11 +5611,25 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           FROM orchestration_events WHERE application_event_version = 2
           AND aggregate_kind = 'thread' AND stream_id = ${threadId}`;
             const snapshotSequence = revisions[0]?.sequence ?? 0;
-            const indexed = index.visible.map((row, position) => ({
-              ...row,
-              position,
-              canonicalPosition: position,
-            }));
+            const conversationId = threadConversationId(index.records.thread);
+            const runIds = new Set(
+              index.records.runs
+                .filter((run) => conversationMatches(run, conversationId))
+                .map((run) => run.id),
+            );
+            const indexed = index.visible
+              .map((row, position) => ({
+                ...row,
+                position,
+                canonicalPosition: position,
+              }))
+              .filter(
+                (row) =>
+                  index.records.thread.conversations === undefined ||
+                  (row.sourceThreadId !== threadId || row.item.runId === null
+                    ? conversationId === "default"
+                    : runIds.has(row.item.runId)),
+              );
             const selection = yield* Effect.try({
               try: () => {
                 const policy = olderHistoryPagePolicy({ items: indexed, cursor, throughEntryId });
@@ -5605,8 +5646,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             });
             const { policy, page } = selection;
             const end = (page.items.at(-1)?.canonicalPosition ?? -1) + 1;
-            const hasUserTurns = index.visible
-              .slice(0, end)
+            const hasUserTurns = indexed
+              .filter((row) => row.canonicalPosition < end)
               .some((row) => isThreadHistoryUserTurn(row.item));
             const materialize = Effect.fn("ProjectionStore.materializeHistoryRows")(function* (
               rows: ReadonlyArray<(typeof indexed)[number]>,
@@ -5741,6 +5782,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       sql
         .withTransaction(
           Effect.gen(function* () {
+            const thread = yield* getThread(threadId);
             const historyAnchor =
               options.anchorItemId === undefined
                 ? undefined
@@ -5758,6 +5800,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   };
             const projection = yield* readProjection(threadId, new Set(), {
               rowLimit: options.rowLimit,
+              ...(thread.conversations === undefined
+                ? {}
+                : { conversationId: threadConversationId(thread) }),
               userTurnLimit: options.userTurnLimit,
               ...(historyAnchor?.threadId === threadId
                 ? { anchorItemId: historyAnchor.itemId }
@@ -7413,6 +7458,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               (thread) =>
                 thread.appThreadId === threadId &&
                 thread.ownerNodeId === null &&
+                conversationMatches(thread, threadConversationId(projection.thread)) &&
                 thread.providerInstanceId === targetInstanceId,
             )
             .toSorted(
@@ -7729,7 +7775,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 return yield* new ProjectionStoreThreadNotFoundError({ threadId });
               return yield* Effect.try({
                 try: () => {
-                  const visible = projection.visibleTurnItems.map((row) => ({
+                  const visible = projectConversation(projection).visibleTurnItems.map((row) => ({
                     ...row,
                     item: projectTurnItemForWire(row.item),
                   }));
@@ -7776,13 +7822,14 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
       getThreadSnapshotWindow: (threadId, options) =>
         service.getThreadSnapshot(threadId).pipe(
           Effect.map((snapshot) => {
+            const conversation = projectConversation(snapshot.projection);
             const anchorIndex =
               options.anchorItemId === undefined
-                ? snapshot.projection.visibleTurnItems.length
-                : snapshot.projection.visibleTurnItems.findIndex(
+                ? conversation.visibleTurnItems.length
+                : conversation.visibleTurnItems.findIndex(
                     (row) => row.sourceItemId === options.anchorItemId,
                   ) + 1;
-            const candidates = snapshot.projection.visibleTurnItems.slice(0, anchorIndex);
+            const candidates = conversation.visibleTurnItems.slice(0, anchorIndex);
             const turnStarts = threadHistoryTurnStarts(candidates.map((row) => row.item));
             const turnAnchors =
               options.userTurnLimit === undefined
@@ -7811,7 +7858,13 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             );
             return {
               ...snapshot,
-              projection: { ...snapshot.projection, visibleTurnItems },
+              projection: {
+                ...snapshot.projection,
+                turnItems: conversation.turnItems.filter((item) =>
+                  visibleTurnItems.some((row) => row.sourceItemId === item.id),
+                ),
+                visibleTurnItems,
+              },
             };
           }),
         ),

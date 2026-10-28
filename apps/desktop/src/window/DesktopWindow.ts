@@ -880,6 +880,7 @@ export const make = Effect.gen(function* () {
 
     const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
     if (yield* Ref.get(desktopState.quitting)) return;
+    const iconPaths = yield* assets.iconPaths;
     const splash = yield* electronWindow.create({
       width: 360,
       height: 220,
@@ -892,6 +893,7 @@ export const make = Effect.gen(function* () {
       show: false,
       skipTaskbar: false,
       backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+      ...getIconOption(iconPaths, environment.platform),
       title: environment.displayName,
       webPreferences: {
         contextIsolation: true,

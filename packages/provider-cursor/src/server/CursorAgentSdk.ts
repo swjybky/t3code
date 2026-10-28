@@ -230,7 +230,16 @@ function runnerError(cause: unknown, method: string): CursorAgentSdkRunnerError 
 }
 
 function isActiveRunConflict(cause: unknown): boolean {
-  return cause instanceof Error && /already has active run/i.test(cause.message);
+  const seen = new Set<object>();
+  let current = cause;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    if (current instanceof Error && /already has active run/i.test(current.message)) {
+      return true;
+    }
+    seen.add(current);
+    current = Reflect.get(current, "cause");
+  }
+  return false;
 }
 
 export function isCursorCancellationError(cause: unknown): boolean {
@@ -397,7 +406,27 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
         ...(cwd === undefined ? {} : { cwd }),
         ...(input.options.local?.store === undefined ? {} : { store: input.options.local.store }),
       };
-      let abandonedRunRecoveryAvailable = input.operation === "resume";
+      // Stop can abandon send() after the SDK has an active run and before its handle returns.
+      const cancelActiveRun = Effect.fn("CursorAgentSdkSession.cancelActiveRun")(function* () {
+        const latestRun = yield* Effect.tryPromise({
+          try: () => Agent.listRuns(agent.agentId, { ...runOptions, limit: 1 }),
+          catch: (cause) => runnerError(cause, "agent.listRuns"),
+        });
+        const activeRun = latestRun.items.find((candidate) => candidate.status === "running");
+        if (activeRun === undefined) {
+          return false;
+        }
+        yield* log({
+          direction: "outgoing",
+          stage: "decoded",
+          payload: { type: "run.cancel", runId: activeRun.id },
+        });
+        yield* Effect.tryPromise({
+          try: () => Agent.cancelRun(activeRun.id, runOptions),
+          catch: (cause) => runnerError(cause, "agent.cancelRun"),
+        });
+        return true;
+      });
 
       return {
         agentId: agent.agentId,
@@ -458,35 +487,16 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
               catch: (cause) => runnerError(cause, "run.start"),
             });
           const run = yield* startRun().pipe(
-            Effect.catchIf(
-              (error) => abandonedRunRecoveryAvailable && isActiveRunConflict(error.cause),
-              (error) =>
-                Effect.gen(function* () {
-                  abandonedRunRecoveryAvailable = false;
-                  const latestRun = yield* Effect.tryPromise({
-                    try: () => Agent.listRuns(agent.agentId, { ...runOptions, limit: 1 }),
-                    catch: (cause) => runnerError(cause, "agent.listRuns"),
-                  });
-                  const activeRun = latestRun.items.find(
-                    (candidate) => candidate.status === "running",
-                  );
-                  if (activeRun === undefined) {
-                    return yield* error;
-                  }
-                  yield* log({
-                    direction: "outgoing",
-                    stage: "decoded",
-                    payload: { type: "run.cancel", runId: activeRun.id },
-                  });
-                  yield* Effect.tryPromise({
-                    try: () => Agent.cancelRun(activeRun.id, runOptions),
-                    catch: (cause) => runnerError(cause, "agent.cancelRun"),
-                  });
-                  return yield* startRun();
-                }),
+            Effect.onInterrupt(() => Effect.uninterruptible(cancelActiveRun().pipe(Effect.ignore))),
+            Effect.catchIf(isActiveRunConflict, (error) =>
+              Effect.gen(function* () {
+                if (!(yield* cancelActiveRun())) {
+                  return yield* error;
+                }
+                return yield* startRun();
+              }),
             ),
           );
-          abandonedRunRecoveryAvailable = false;
           runId = run.id;
           yield* log({
             direction: "incoming",

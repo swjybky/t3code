@@ -1,0 +1,4 @@
+interface:
+  display_name: "更新版本"
+  short_description: "拉取 upstream 最新代码，保留 fork 私有改动并解决合并冲突"
+  default_prompt: "使用 $update-version 更新本项目：拉取 upstream 最新代码并合并到当前本地分支，保留私有改动，解决冲突并验证。"

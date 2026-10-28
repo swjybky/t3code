@@ -9,6 +9,7 @@ import {
   type ThreadId as ThreadIdType,
 } from "@t3tools/contracts";
 import { boundedSnapshotProjection } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
+import { threadConversationId } from "@t3tools/shared/threadConversations";
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -635,6 +636,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const applyItems = Effect.fn("EnvironmentThreadState.applyItems")(function* (
     items: ReadonlyArray<OrchestrationV2ThreadStreamItem>,
   ) {
+    const before = yield* SubscriptionRef.get(state);
     yield* applyLock.withPermits(1)(
       Effect.gen(function* () {
         let events: SequencedItem[] = [];
@@ -654,6 +656,36 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         yield* remember;
       }),
     );
+    const after = yield* SubscriptionRef.get(state);
+    if (
+      Option.isSome(before.data) &&
+      Option.isSome(after.data) &&
+      threadConversationId(before.data.value.thread) !==
+        threadConversationId(after.data.value.thread)
+    ) {
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared)) return;
+      const loaded = yield* snapshotLoader.load(prepared.value, threadId);
+      if (loaded._tag === "missing") return yield* setDeleted();
+      if (loaded._tag === "unavailable")
+        return yield* setStreamError("无法加载对话历史，请重新连接后重试。");
+      yield* applyLock.withPermits(1)(
+        Effect.gen(function* () {
+          if (loaded.snapshot.snapshotSequence < (yield* SubscriptionRef.get(lastSequence))) return;
+          yield* SubscriptionRef.set(lastSequence, loaded.snapshot.snapshotSequence);
+          yield* setThread(loaded.snapshot.projection, {
+            history:
+              loaded.history === undefined
+                ? EMPTY_THREAD_HISTORY_META
+                : {
+                    ...EMPTY_THREAD_HISTORY_META,
+                    ...loaded.history,
+                  },
+          });
+          yield* remember;
+        }),
+      );
+    }
   });
 
   const loadEarlier = Effect.fn("EnvironmentThreadState.loadEarlier")(function* (

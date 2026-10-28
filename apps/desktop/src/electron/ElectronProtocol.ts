@@ -10,14 +10,41 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
+import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import * as Electron from "electron";
 
 export const DESKTOP_HOST = "app";
 const DESKTOP_PRODUCTION_SCHEME = "t3code";
 const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
+// That Clerk instance allows this scheme and rejects t3code-dev://app.
+const OFFICIAL_CONNECT_FRONTEND_API = "clerk.t3.codes";
+
+declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
+
+export function desktopSchemeForConnectKey(
+  isDevelopment: boolean,
+  publishableKey: string | undefined,
+): string {
+  if (!isDevelopment) return DESKTOP_PRODUCTION_SCHEME;
+  const key = publishableKey?.trim();
+  if (key?.startsWith("pk_live_")) {
+    try {
+      if (clerkFrontendApiHostnameFromPublishableKey(key) === OFFICIAL_CONNECT_FRONTEND_API) {
+        return DESKTOP_PRODUCTION_SCHEME;
+      }
+    } catch {
+      // An unreadable key keeps the development origin.
+    }
+  }
+  return DESKTOP_DEVELOPMENT_SCHEME;
+}
 
 export function getDesktopScheme(isDevelopment: boolean): string {
-  return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
+  const publishableKey =
+    typeof __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__ === "string"
+      ? __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__
+      : undefined;
+  return desktopSchemeForConnectKey(isDevelopment, publishableKey);
 }
 
 function getDesktopOrigin(isDevelopment: boolean): string {

@@ -5,6 +5,7 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
+import { createConversationProjector } from "@t3tools/shared/threadConversations";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/reactivity";
 
@@ -198,12 +199,16 @@ export function createEnvironmentThreadDetailAtoms<E>(
 ) {
   const threadStateValueAtomFamily = Atom.family((key: string) => {
     const ref = parseThreadKey(key);
-    return Atom.make((get) =>
-      Option.getOrElse(
+    const project = createConversationProjector();
+    return Atom.make((get) => {
+      const state = Option.getOrElse(
         AsyncResult.value(get(threadStateAtom(ref.environmentId, ref.threadId))),
         () => EMPTY_ENVIRONMENT_THREAD_STATE,
-      ),
-    ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-state-value:${key}`));
+      );
+      return Option.isNone(state.data)
+        ? state
+        : { ...state, data: Option.some(project(state.data.value)) };
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-state-value:${key}`));
   });
 
   const threadAtomFamily = Atom.family((key: string) => {

@@ -178,6 +178,58 @@ describe("DesktopLinuxUrlHandler", () => {
     assert.include(entry, "Icon=/home/al ice/icons/T3\\\\x.png");
   });
 
+  it("relaunches the source checkout so a sign-in callback reaches the running app", () => {
+    const launch = DesktopLinuxUrlHandler.developmentProtocolLaunch({
+      devServerUrl: "http://127.0.0.1:5733",
+      execPath: "/runtime/electron",
+      cwd: "/repo/apps/desktop",
+      argv: [
+        "/runtime/electron",
+        "--no-sandbox",
+        "--t3code-dev-root=/repo/apps/desktop",
+        "dist-electron/main.cjs",
+        "t3code://app/oauth-callback",
+      ],
+      resolvePath: (cwd, target) => (target.startsWith("/") ? target : `${cwd}/${target}`),
+    });
+    const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
+      displayName: "T3 Code (Dev)",
+      execTarget: launch.execTarget,
+      execArguments: launch.execArguments,
+      scheme: "t3code",
+    });
+
+    assert.equal(launch.execTarget, "env");
+    assert.include(
+      entry,
+      "Exec=env VITE_DEV_SERVER_URL=http://127.0.0.1:5733 /runtime/electron --no-sandbox --t3code-dev-root=/repo/apps/desktop /repo/apps/desktop/dist-electron/main.cjs %U",
+    );
+    assert.notInclude(entry, "oauth-callback");
+    assert.notInclude(entry, "T3CODE_PORT=");
+  });
+
+  it("keeps the backend port on the development launcher", () => {
+    const launch = DesktopLinuxUrlHandler.developmentProtocolLaunch({
+      devServerUrl: "http://127.0.0.1:5733",
+      execPath: "/runtime/electron",
+      cwd: "/repo/apps/desktop",
+      argv: ["/runtime/electron", "dist-electron/main.cjs"],
+      environment: { T3CODE_PORT: "13773", T3CODE_HOME: "/tmp/t3 home" },
+      resolvePath: (cwd, target) => (target.startsWith("/") ? target : `${cwd}/${target}`),
+    });
+    const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
+      displayName: "T3 Code (Dev)",
+      execTarget: launch.execTarget,
+      execArguments: launch.execArguments,
+      scheme: "t3code-dev",
+    });
+
+    assert.include(
+      entry,
+      'Exec=env VITE_DEV_SERVER_URL=http://127.0.0.1:5733 T3CODE_PORT=13773 "T3CODE_HOME=/tmp/t3 home" /runtime/electron /repo/apps/desktop/dist-electron/main.cjs %U',
+    );
+  });
+
   it.effect(
     "writes the handler entry, refreshes the MIME cache, and claims the scheme default",
     () => {
@@ -310,7 +362,7 @@ describe("DesktopLinuxUrlHandler", () => {
     });
   });
 
-  it.effect("writes the portal identity without claiming the URL scheme in development", () => {
+  it.effect("registers the source-launch handler so the browser can open it", () => {
     const nonLinux = emptyRecording();
     const unpackaged = emptyRecording();
 
@@ -319,7 +371,10 @@ describe("DesktopLinuxUrlHandler", () => {
       yield* runRegister(unpackaged, {
         environment: {
           isPackaged: false,
+          isDevelopment: true,
+          devServerUrl: Option.some(new URL("http://127.0.0.1:5733")),
           linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
+          linuxWmClass: "t3code-dev",
         },
       });
 
@@ -328,7 +383,50 @@ describe("DesktopLinuxUrlHandler", () => {
         unpackaged.files[0]?.path,
         "/home/alice/.local/share/applications/com.t3tools.T3Code.Development.desktop",
       );
-      assert.deepEqual(unpackaged.commands, []);
+      assert.include(unpackaged.files[0]?.content, "VITE_DEV_SERVER_URL=http://127.0.0.1:5733");
+      assert.include(unpackaged.files[0]?.content, "NoDisplay=false");
+      assert.include(unpackaged.files[0]?.content, "StartupWMClass=t3code-dev");
+      assert.notInclude(unpackaged.files[0]?.content, "Icon=");
+      const mimeType = unpackaged.files[0]?.content.match(
+        /MimeType=(x-scheme-handler\/[^;]+);/u,
+      )?.[1];
+      if (mimeType === undefined) {
+        assert.fail("development launcher is missing its scheme handler");
+      }
+      assert.deepEqual(unpackaged.commands, [
+        {
+          command: "update-desktop-database",
+          args: ["/home/alice/.local/share/applications"],
+        },
+        {
+          command: "xdg-mime",
+          args: ["default", "com.t3tools.T3Code.Development.desktop", mimeType],
+        },
+      ]);
+    });
+  });
+
+  it.effect("points the visible development launcher at the real icon", () => {
+    const recorded = emptyRecording();
+    const iconPath = "/home/alice/.local/share/icons/com.t3tools.T3Code.Development.desktop.png";
+    return Effect.gen(function* () {
+      yield* runRegister(recorded, {
+        iconSource: "/repo/assets/prod/black-universal-1024.png",
+        environment: {
+          isPackaged: false,
+          isDevelopment: true,
+          displayName: "T3 Code (Dev)",
+          devServerUrl: Option.some(new URL("http://127.0.0.1:5733")),
+          linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
+          linuxWmClass: "t3code-dev",
+        },
+      });
+      assert.include(recorded.files[0]?.content, "Name=T3 Code (Dev)");
+      assert.include(recorded.files[0]?.content, `Icon=${iconPath}`);
+      assert.include(recorded.files[0]?.content, "StartupWMClass=t3code-dev");
+      assert.deepEqual(recorded.copies, [
+        { source: "/repo/assets/prod/black-universal-1024.png", destination: iconPath },
+      ]);
     });
   });
 
@@ -365,6 +463,7 @@ interface ThemeIconRun {
   readonly commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }>;
   readonly iconCacheOptions?: Array<Record<string, unknown>>;
   readonly sourceMissing?: boolean;
+  readonly development?: boolean;
   readonly iconCacheExitCode?: number;
   readonly iconCacheSpawnFails?: boolean;
   readonly iconCacheStalled?: boolean;
@@ -388,6 +487,15 @@ const registerWithRealFileSystem = (run: ThemeIconRun) =>
                 Effect.map((path) =>
                   makeEnvironment(path, {
                     linuxApplicationsDir: path.join(run.root, "applications"),
+                    ...(run.development
+                      ? {
+                          isPackaged: false,
+                          isDevelopment: true,
+                          displayName: "T3 Code (Dev)",
+                          linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
+                          linuxWmClass: "t3code-dev",
+                        }
+                      : {}),
                   }),
                 ),
               ),
@@ -397,13 +505,15 @@ const registerWithRealFileSystem = (run: ThemeIconRun) =>
               Path.Path.pipe(
                 Effect.map((path) => ({
                   iconPaths: Effect.succeed({
-                    png: Option.none(),
+                    png: run.development
+                      ? Option.some(path.join(run.root, "resources", "icons", "256x256.png"))
+                      : Option.none(),
                     ico: Option.none(),
                     icns: Option.none(),
                   }),
                   resolveResourcePath: (fileName: string) =>
                     Effect.succeed(
-                      fileName === "icons/256x256.png"
+                      !run.development && fileName === "icons/256x256.png"
                         ? Option.some(
                             path.join(
                               run.root,
@@ -512,6 +622,36 @@ it.layer(NodeServices.layer)("DesktopLinuxUrlHandler theme icons", (it) => {
       }
       assert.isFalse(yield* fileSystem.exists(fixture.cachePath));
       assert.equal(iconCacheRuns(run), 0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("installs the development blueprint icon where the dock looks up the dev app", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const icon = new Uint8Array([137, 80, 78, 71, 9]);
+      const fixture = yield* themeIconFixture(icon);
+      const run: ThemeIconRun = { root: fixture.root, commands: [], development: true };
+
+      yield* registerWithRealFileSystem(run);
+
+      assert.deepEqual([...(yield* fileSystem.readDirectory(fixture.appsDir))].sort(), [
+        "com.t3tools.T3Code.Development.png",
+        "com.t3tools.t3code.development.png",
+        "t3code-dev.png",
+      ]);
+      const desktopIcon = path.join(
+        fixture.root,
+        "icons",
+        "com.t3tools.T3Code.Development.desktop.png",
+      );
+      assert.deepEqual([...(yield* fileSystem.readFile(desktopIcon))], [...icon]);
+      const entry = yield* fileSystem.readFileString(
+        path.join(fixture.root, "applications", "com.t3tools.T3Code.Development.desktop"),
+      );
+      assert.include(entry, "Name=T3 Code (Dev)");
+      assert.include(entry, `Icon=${desktopIcon}`);
+      assert.include(entry, "StartupWMClass=t3code-dev");
     }).pipe(Effect.scoped),
   );
 

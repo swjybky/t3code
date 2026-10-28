@@ -948,6 +948,29 @@ effectIt.effect(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+effectIt.effect("preserves the conversation when an adapter opens a native thread", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({ text: "Fresh task", failReadsAfterRunning: true });
+    const before = harness.projection();
+    harness.setProjection({
+      ...before,
+      thread: {
+        ...before.thread,
+        activeConversationId: "second",
+        conversations: [{ id: "second", title: "Fresh task", createdAt: "2026-09-04T12:00:00Z" }],
+      },
+      runs: before.runs.map((run) => ({ ...run, conversationId: "second" })),
+      providerThreads: before.providerThreads.map((thread) => ({
+        ...thread,
+        conversationId: "second",
+      })),
+    });
+    yield* harness.start;
+    expect(harness.projection().providerThreads[0]?.conversationId).toBe("second");
+    expect(harness.startRootRun).toHaveBeenCalledOnce();
+  }),
+);
+
 effectIt.effect("recovers an abandoned failed turn before continuing its native conversation", () =>
   Effect.gen(function* () {
     const harness = makeLocalCommandHarness({

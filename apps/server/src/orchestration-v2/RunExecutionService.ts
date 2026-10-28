@@ -1287,8 +1287,20 @@ export const layer: Layer.Layer<
         // as a dev server keep this consumer alive afterwards and must not pin preview focus.
         const endPreviewActivity = yield* previewAgentActivity.begin(input.run.threadId);
         const providerEventFiber = yield* eventSubscription.events.pipe(
-          Stream.mapEffect((event) =>
+          Stream.mapEffect((incoming) =>
             Effect.gen(function* () {
+              const event =
+                incoming.type === "provider_thread.updated" &&
+                incoming.providerThread.id === input.providerThread.id &&
+                input.run.conversationId !== undefined
+                  ? {
+                      ...incoming,
+                      providerThread: {
+                        ...incoming.providerThread,
+                        conversationId: input.run.conversationId,
+                      },
+                    }
+                  : incoming;
               const previous = yield* Ref.get(eventRouting);
               const [accepted, routing] = routeProviderEvent(event, routeIdentity, previous);
               yield* Ref.set(eventRouting, routing);

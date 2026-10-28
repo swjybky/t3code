@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./threadConversations": {
+      "types": "./src/threadConversations.ts",
+      "import": "./src/threadConversations.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

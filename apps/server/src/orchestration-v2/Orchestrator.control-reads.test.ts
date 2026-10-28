@@ -37,6 +37,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { encodeThreadHistoryCursor } from "./threadHistoryPaging.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -60,6 +61,275 @@ const layerTest = Layer.mergeAll(
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
     { databaseLayer: layerDatabase, runEffectWorker: false },
   ),
+);
+
+it.effect("creates independent conversations and restores the original provider thread", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:conversations");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("conversation:create-thread"),
+      threadId,
+      projectId: ProjectId.make("project:conversations"),
+      title: "Original conversation",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: "feature/conversations",
+      worktreePath: "/repo/worktree",
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const untouched = yield* projections.getThreadSnapshot(threadId);
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("conversation:empty-original"),
+      threadId,
+      conversation: { type: "create", conversationId: "unused", expectedConversationId: "default" },
+    });
+    assert.deepEqual(yield* projections.getThreadSnapshot(threadId), untouched);
+    const send = (id: string) =>
+      orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`send:${id}`),
+        threadId,
+        messageId: MessageId.make(id),
+        text: id,
+        attachments: [],
+        createdBy: "user",
+        creationSource: "web",
+        dispatchMode: { type: "defer_start" },
+      });
+    const finish = Effect.fn("test.finishConversationRun")(function* () {
+      const projection = yield* projections.getThreadProjection(threadId);
+      const run = projection.runs.at(-1)!;
+      yield* projections.apply({
+        type: "run.updated",
+        id: EventId.make(`finish:${run.id}`),
+        threadId,
+        runId: run.id,
+        occurredAt: now,
+        payload: { ...run, status: "completed", completedAt: now },
+      });
+      return run;
+    });
+    yield* send("original");
+    const blocked = yield* orchestrator
+      .dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("conversation:busy"),
+        threadId,
+        conversation: {
+          type: "create",
+          conversationId: "second",
+          expectedConversationId: "default",
+        },
+      })
+      .pipe(Effect.result);
+    assert.isTrue(Result.isFailure(blocked));
+    const blockedDelete = yield* orchestrator
+      .dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("conversation:busy-delete"),
+        threadId,
+        conversation: {
+          type: "delete",
+          conversationId: "default",
+          expectedConversationId: "default",
+        },
+      })
+      .pipe(Effect.result);
+    assert.isTrue(Result.isFailure(blockedDelete));
+    const original = yield* finish();
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("conversation:new"),
+      threadId,
+      conversation: { type: "create", conversationId: "second", expectedConversationId: "default" },
+    });
+    const empty = yield* projections.getThreadProjection(threadId);
+    assert.equal(empty.thread.activeConversationId, "second");
+    assert.isNull(empty.thread.activeProviderThreadId);
+    assert.equal(empty.messages.length, 1);
+    assert.equal(empty.thread.conversations?.length, 2);
+    assert.equal(empty.thread.worktreePath, "/repo/worktree");
+    assert.equal(empty.thread.branch, "feature/conversations");
+    const emptySnapshot = yield* projections.getThreadSnapshot(threadId);
+    for (const id of ["empty-third", "empty-fourth"]) {
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make(`conversation:${id}`),
+        threadId,
+        conversation: { type: "create", conversationId: id, expectedConversationId: "second" },
+      });
+      assert.deepEqual(yield* projections.getThreadSnapshot(threadId), emptySnapshot);
+    }
+    const staleSend = yield* orchestrator
+      .dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("conversation:stale-send"),
+        threadId,
+        messageId: MessageId.make("stale-send"),
+        text: "Wrong conversation",
+        attachments: [],
+        createdBy: "user",
+        creationSource: "web",
+        dispatchMode: { type: "defer_start" },
+        expectedConversationId: "default",
+      })
+      .pipe(Effect.result);
+    assert.isTrue(Result.isFailure(staleSend));
+    yield* send("second");
+    const second = yield* finish();
+    assert.notEqual(second.providerThreadId, original.providerThreadId);
+    assert.equal(second.conversationId, "second");
+    assert.equal(second.ordinal, 2);
+    assert.isNull(second.contextHandoffId);
+    const secondWindow = yield* projections.getThreadSnapshotWindow(threadId, {
+      rowLimit: 75,
+      userTurnLimit: 10,
+    });
+    assert.deepEqual(
+      secondWindow.projection.turnItems
+        .filter((item) => item.type === "user_message")
+        .map((item) => item.text),
+      ["second"],
+    );
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("conversation:restore"),
+      threadId,
+      conversation: { type: "select", conversationId: "default", expectedConversationId: "second" },
+    });
+    yield* send("original-follow-up");
+    const restored = yield* finish();
+    assert.equal(restored.providerThreadId, original.providerThreadId);
+    assert.equal(restored.ordinal, 3);
+    assert.equal((yield* projections.getThreadProjection(threadId)).messages.length, 3);
+    const originalWindow = yield* projections.getThreadSnapshotWindow(threadId, {
+      rowLimit: 75,
+      userTurnLimit: 10,
+    });
+    assert.deepEqual(
+      originalWindow.projection.turnItems
+        .filter((item) => item.type === "user_message")
+        .map((item) => item.text),
+      ["original", "original-follow-up"],
+    );
+    const projection = yield* projections.getThreadProjection(threadId);
+    assert.equal(
+      projection.thread.conversations?.find((row) => row.id === "second")?.title,
+      "second",
+    );
+    const inactiveProvider = projection.providerThreads.find(
+      (row) => row.id === second.providerThreadId,
+    )!;
+    yield* projections.apply({
+      type: "provider-thread.updated",
+      id: EventId.make("late-inactive-provider-update"),
+      threadId,
+      occurredAt: now,
+      payload: { ...inactiveProvider, updatedAt: now },
+    });
+    assert.equal(
+      (yield* projections.getThreadProjection(threadId)).thread.activeProviderThreadId,
+      original.providerThreadId,
+    );
+    const followUp = originalWindow.projection.visibleTurnItems.find(
+      (row) => row.item.runId === restored.id,
+    )!;
+    const history = yield* projections.getThreadHistoryPage(
+      threadId,
+      encodeThreadHistoryCursor({
+        snapshotSequence: originalWindow.snapshotSequence,
+        sourceThreadId: threadId,
+        sourceItemId: followUp.sourceItemId,
+        position: followUp.position,
+      }),
+    );
+    assert.deepEqual(
+      history.items.filter((row) => row.item.type === "user_message").map((row) => row.item.runId),
+      [original.id],
+    );
+    for (const [id, conversation] of [
+      ["stale", { type: "create", conversationId: "third", expectedConversationId: "second" }],
+      ["missing", { type: "select", conversationId: "missing", expectedConversationId: "default" }],
+      [
+        "duplicate",
+        { type: "create", conversationId: "second", expectedConversationId: "default" },
+      ],
+    ] as const) {
+      const result = yield* orchestrator
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make(`conversation:${id}`),
+          threadId,
+          conversation,
+        })
+        .pipe(Effect.result);
+      assert.isTrue(Result.isFailure(result));
+    }
+    const change = (
+      type: "delete" | "restore" | "select",
+      conversationId: string,
+      expectedConversationId: string,
+      id: string,
+    ) =>
+      orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make(`conversation:removal:${id}`),
+        threadId,
+        conversation: { type, conversationId, expectedConversationId },
+      });
+    const readVisible = Effect.gen(function* () {
+      const current = yield* projections.getThreadProjection(threadId);
+      return {
+        ...current,
+        visible: current.thread.conversations
+          ?.filter((row) => row.deletedAt == null)
+          .map((row) => row.id),
+      };
+    });
+    yield* change("delete", "second", "default", "inactive");
+    const removed = yield* readVisible;
+    assert.deepEqual(removed.visible, ["default"]);
+    assert.equal(removed.thread.activeConversationId, "default");
+    assert.isTrue(
+      Result.isFailure(
+        yield* change("select", "second", "default", "deleted-selection").pipe(Effect.result),
+      ),
+    );
+    yield* change("restore", "second", "default", "undo");
+    assert.deepEqual((yield* readVisible).visible, ["default", "second"]);
+    yield* change("select", "second", "default", "select-restored");
+    assert.equal((yield* readVisible).thread.activeProviderThreadId, second.providerThreadId);
+    yield* change("delete", "second", "second", "active");
+    const afterActive = yield* readVisible;
+    assert.equal(afterActive.thread.activeConversationId, "default");
+    assert.equal(afterActive.thread.activeProviderThreadId, original.providerThreadId);
+    yield* change("delete", "default", "default", "last");
+    const afterLast = yield* readVisible;
+    assert.equal(afterLast.visible?.length, 1);
+    assert.notEqual(afterLast.thread.activeConversationId, "default");
+    assert.notEqual(afterLast.thread.activeConversationId, "second");
+    assert.isNull(afterLast.thread.activeProviderThreadId);
+    assert.equal(
+      (yield* projections.getThreadSnapshotWindow(threadId, { rowLimit: 75 })).projection
+        .visibleTurnItems.length,
+      0,
+    );
+    yield* change("restore", "default", "default", "undo-after-selection-changed");
+    const restoredConversations = yield* readVisible;
+    assert.ok(restoredConversations.visible?.includes("default"));
+    assert.equal(
+      restoredConversations.thread.activeConversationId,
+      afterLast.thread.activeConversationId,
+    );
+    assert.equal((yield* readVisible).messages.length, 3);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect(
