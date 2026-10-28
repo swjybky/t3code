@@ -10,12 +10,26 @@ import { assert, describe, it } from "vite-plus/test";
 import {
   makeDevelopmentEnvironmentScript,
   makeDevelopmentLauncherScript,
+  resolveAppProtocolSchemes,
   resolveElectronBinaryPath,
   resolveMacLauncherPaths,
   writeDevelopmentLauncherScript,
 } from "./electron-launcher.mjs";
 
 describe("electron development launcher", () => {
+  it.each([
+    [true, "pk_live_Y2xlcmsudDMuY29kZXMk", ["t3code-dev", "t3code"]],
+    [true, `pk_live_${btoa("clerk.example.com$")}`, ["t3code-dev"]],
+    [true, "pk_test_example", ["t3code-dev"]],
+    [true, undefined, ["t3code-dev"]],
+    [false, undefined, ["t3code"]],
+  ])(
+    "registers Connect callbacks alongside existing app links (development: %s, key: %s)",
+    (development, publishableKey, expected) => {
+      assert.deepEqual(resolveAppProtocolSchemes(development, publishableKey), expected);
+    },
+  );
+
   it("uses captured values only as fallbacks for a live runner environment", () => {
     const environmentScript = makeDevelopmentEnvironmentScript({
       VITE_DEV_SERVER_URL: "http://127.0.0.1:8526",

@@ -209,3 +209,12 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 
 - Don't verify with browsers or computer use unless the user explicitly agrees or requests it.
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
+
+## Local fork: upstream compatibility
+
+This fork regularly syncs with upstream. For local features and fixes, prioritize reducing merge conflicts and preserving upstream behavior. These local preferences take precedence over general refactoring guidance above.
+
+- Keep fork-specific logic in existing local feature modules or small dedicated files, with only the necessary integration points in upstream code. Reuse upstream services instead of copying their implementations or introducing a generic extension framework.
+- Preserve upstream control flow and default behavior wherever possible. Threads and other paths that do not use the local feature should continue through the original logic.
+- Avoid unrelated refactors, renames, file moves, formatting, dependency changes, and rewrites of existing tests. Keep changes and regression coverage focused on the local feature.
+- When an upstream core change is necessary for correctness, make the smallest practical change and explain why it is needed and where future merge conflicts may occur. Verify both the local feature and the relevant original behavior; do not promise conflict-free future updates.

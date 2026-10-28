@@ -67,6 +67,7 @@ it.effect("creates independent conversations and restores the original provider 
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
     const threadId = ThreadId.make("thread:conversations");
     const now = yield* DateTime.now;
     yield* orchestrator.dispatch({
@@ -152,6 +153,7 @@ it.effect("creates independent conversations and restores the original provider 
     });
     const empty = yield* projections.getThreadProjection(threadId);
     assert.equal(empty.thread.activeConversationId, "second");
+    assert.equal(empty.thread.title, "对话 2");
     assert.isNull(empty.thread.activeProviderThreadId);
     assert.equal(empty.messages.length, 1);
     assert.equal(empty.thread.conversations?.length, 2);
@@ -183,6 +185,33 @@ it.effect("creates independent conversations and restores the original provider 
       .pipe(Effect.result);
     assert.isTrue(Result.isFailure(staleSend));
     yield* send("second");
+    const titled = yield* projections.getThreadProjection(threadId);
+    assert.equal(titled.thread.title, "second");
+    assert.equal(titled.thread.titleRegeneration?.requestId, "send:second");
+    assert.deepEqual(
+      (yield* outbox.listByCommandId(CommandId.make("send:second")))
+        .filter((effect) => effect.request.type === "thread-title.generate")
+        .map((effect) => effect.request),
+      [
+        {
+          type: "thread-title.generate",
+          kind: { type: "initial", messageId: MessageId.make("second") },
+        },
+      ],
+    );
+    yield* orchestrator.dispatch({
+      type: "thread.title.regeneration.complete",
+      commandId: CommandId.make("conversation:title-complete"),
+      threadId,
+      requestId: CommandId.make("send:second"),
+      title: "Generated second title",
+    });
+    const generated = yield* projections.getThreadProjection(threadId);
+    assert.equal(generated.thread.title, "Generated second title");
+    assert.equal(
+      generated.thread.conversations?.find((row) => row.id === "second")?.title,
+      "Generated second title",
+    );
     const second = yield* finish();
     assert.notEqual(second.providerThreadId, original.providerThreadId);
     assert.equal(second.conversationId, "second");
@@ -200,9 +229,23 @@ it.effect("creates independent conversations and restores the original provider 
     );
     yield* orchestrator.dispatch({
       type: "thread.metadata.update",
+      commandId: CommandId.make("conversation:regenerate-before-switch"),
+      threadId,
+      regenerateTitle: true,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
       commandId: CommandId.make("conversation:restore"),
       threadId,
       conversation: { type: "select", conversationId: "default", expectedConversationId: "second" },
+    });
+    assert.isNull((yield* projections.getThreadProjection(threadId)).thread.titleRegeneration);
+    yield* orchestrator.dispatch({
+      type: "thread.title.regeneration.complete",
+      commandId: CommandId.make("conversation:stale-title-complete"),
+      threadId,
+      requestId: CommandId.make("conversation:regenerate-before-switch"),
+      title: "Late second title",
     });
     yield* send("original-follow-up");
     const restored = yield* finish();
@@ -220,9 +263,10 @@ it.effect("creates independent conversations and restores the original provider 
       ["original", "original-follow-up"],
     );
     const projection = yield* projections.getThreadProjection(threadId);
+    assert.equal(projection.thread.title, "Original conversation");
     assert.equal(
       projection.thread.conversations?.find((row) => row.id === "second")?.title,
-      "second",
+      "Generated second title",
     );
     const inactiveProvider = projection.providerThreads.find(
       (row) => row.id === second.providerThreadId,
@@ -306,12 +350,25 @@ it.effect("creates independent conversations and restores the original provider 
     assert.deepEqual((yield* readVisible).visible, ["default", "second"]);
     yield* change("select", "second", "default", "select-restored");
     assert.equal((yield* readVisible).thread.activeProviderThreadId, second.providerThreadId);
+    assert.equal((yield* readVisible).thread.title, "Generated second title");
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("conversation:rename"),
+      threadId,
+      title: "Renamed second title",
+    });
+    assert.equal(
+      (yield* readVisible).thread.conversations?.find((row) => row.id === "second")?.title,
+      "Renamed second title",
+    );
     yield* change("delete", "second", "second", "active");
     const afterActive = yield* readVisible;
+    assert.equal(afterActive.thread.title, "Original conversation");
     assert.equal(afterActive.thread.activeConversationId, "default");
     assert.equal(afterActive.thread.activeProviderThreadId, original.providerThreadId);
     yield* change("delete", "default", "default", "last");
     const afterLast = yield* readVisible;
+    assert.equal(afterLast.thread.title, "新对话");
     assert.equal(afterLast.visible?.length, 1);
     assert.notEqual(afterLast.thread.activeConversationId, "default");
     assert.notEqual(afterLast.thread.activeConversationId, "second");

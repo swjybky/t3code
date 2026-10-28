@@ -1,3 +1,4 @@
+import { projectConversation } from "@t3tools/shared/threadConversations";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
@@ -140,9 +141,14 @@ const make = Effect.gen(function* () {
             ? { message: "", attachments: [] }
             : { message: message.text, attachments: message.attachments };
       } else {
-        context = formatThreadTitleContext(
-          projection.messages.filter((message) => !message.streaming),
-        );
+        const messages =
+          projection.thread.conversations === undefined
+            ? projection.messages
+            : projectConversation({
+                ...(yield* threads.getThreadRecords(input.threadId, ["runs", "providerThreads"])),
+                ...projection,
+              }).messages;
+        context = formatThreadTitleContext(messages.filter((message) => !message.streaming));
       }
       if (context.message.length === 0 && context.attachments.length === 0) {
         return { type: "complete" as const };

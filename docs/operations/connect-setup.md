@@ -70,7 +70,8 @@ t3code://app/
 ```
 
 Add the corresponding origin to the Clerk instance's Backend API `allowed_origins` array.
-Development uses `t3code-dev://app`; production uses `t3code://app`. Update the array with
+Development uses `t3code-dev://app`, except with the official production key from `.env.example`,
+which uses `t3code://app` like production builds. Update the array with
 `PATCH https://api.clerk.com/v1/instance` using the Clerk secret key, preserving existing entries.
 The Clerk Electron integration handles token
 persistence and system-browser callback delivery.

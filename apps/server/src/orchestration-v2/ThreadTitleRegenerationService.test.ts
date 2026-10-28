@@ -480,4 +480,62 @@ describe("ThreadTitleRegenerationService", () => {
       }).pipe(Effect.provide(harness.layer));
     }),
   );
+
+  it.effect("regenerates only the selected conversation's title", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({
+        generateTitle: () => Effect.succeed({ title: "Fresh title" }),
+      });
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const titleRegeneration = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+        const threadId = yield* createThread({
+          command: "command:title:landing:create",
+          thread: "thread:title:landing",
+        });
+        yield* recordRun({
+          threadId,
+          runId: RunId.make("run:title:landing:original"),
+          ordinal: 1,
+          user: "Unrelated previous conversation",
+          assistant: "Previous work completed.",
+        });
+        yield* threads.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("command:title:landing:new-conversation"),
+          threadId,
+          conversation: {
+            type: "create",
+            conversationId: "second",
+            expectedConversationId: "default",
+          },
+        });
+        yield* dispatchUserMessage({
+          command: "command:title:landing:message",
+          threadId,
+          text: "Investigate the flaky login test",
+        });
+        const requestId = yield* armRegeneration({
+          command: "command:title:landing:1",
+          threadId,
+        });
+
+        yield* titleRegeneration.execute({ threadId, requestId, kind: { type: "regenerate" } });
+
+        const call = harness.generateThreadTitle.mock.calls[0]?.[0];
+        assert.equal(call?.previousTitle, "Investigate the flaky login test");
+        assert.equal(call?.cwd, "/repo");
+        assert.include(call?.message, "USER:\nInvestigate the flaky login test");
+        assert.notInclude(call?.message, "Unrelated previous conversation");
+        assert.notInclude(call?.message, "Previous work completed.");
+        const projection = yield* threads.getThreadProjection(threadId);
+        assert.equal(projection.thread.title, "Fresh title");
+        assert.equal(
+          projection.thread.conversations?.find((row) => row.id === "second")?.title,
+          "Fresh title",
+        );
+        assert.isNotOk(projection.thread.titleRegeneration);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
 });

@@ -5,6 +5,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { ensureElectronRuntime } from "./ensure-electron-runtime.mjs";
+import { loadRepoEnv } from "../../../scripts/lib/public-config.ts";
+import { desktopSchemeForConnectKey } from "../src/electron/desktopConnectProtocol.ts";
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -17,11 +19,19 @@ const APP_DISPLAY_NAME = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Beta)";
 const APP_BUNDLE_ID = isDevelopment
   ? `com.t3tools.t3code.dev.${devBundleIdSuffix || "local"}`
   : "com.t3tools.t3code";
-const APP_PROTOCOL_SCHEMES = isDevelopment ? ["t3code-dev"] : ["t3code"];
+const APP_PROTOCOL_SCHEMES = resolveAppProtocolSchemes(
+  isDevelopment,
+  loadRepoEnv().T3CODE_CLERK_PUBLISHABLE_KEY,
+);
 const LAUNCHER_VERSION = 20;
 const productionMacIconPngPath = NodePath.join(repoRoot, "assets", "prod", "black-macos-1024.png");
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher script has no Effect runtime.
 const hostPlatform = NodeOS.platform();
+
+export function resolveAppProtocolSchemes(development, publishableKey) {
+  const scheme = desktopSchemeForConnectKey(development, publishableKey);
+  return development && scheme !== "t3code-dev" ? ["t3code-dev", scheme] : [scheme];
+}
 
 function setPlistString(plistPath, key, value) {
   const replaceResult = NodeChildProcess.spawnSync(

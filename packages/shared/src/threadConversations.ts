@@ -30,6 +30,19 @@ export function threadConversationId(
   return thread.activeConversationId ?? ORIGINAL_CONVERSATION_ID;
 }
 
+export function syncConversationTitle(thread: ConversationProjection["thread"]) {
+  if (thread.conversations === undefined) return thread;
+  const conversationId = threadConversationId(thread);
+  const current = thread.conversations.find((conversation) => conversation.id === conversationId);
+  if (current === undefined || current.title === thread.title) return thread;
+  return {
+    ...thread,
+    conversations: thread.conversations.map((conversation) =>
+      conversation.id === conversationId ? { ...conversation, title: thread.title } : conversation,
+    ),
+  };
+}
+
 export function conversationMatches(
   row: { readonly conversationId?: string | undefined },
   conversationId: string,

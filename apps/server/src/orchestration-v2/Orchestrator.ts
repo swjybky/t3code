@@ -10,6 +10,7 @@ import {
   conversationSwitchBlocked,
   ORIGINAL_CONVERSATION_ID,
   projectConversation,
+  syncConversationTitle,
   threadConversationId,
 } from "@t3tools/shared/threadConversations";
 import {
@@ -3274,6 +3275,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? {}
           : {
               activeConversationId: nextConversationId,
+              title:
+                nextConversations.find((conversation) => conversation.id === nextConversationId)
+                  ?.title ?? thread.title,
+              titleRegeneration: null,
               activeProviderThreadId: previousRun?.providerThreadId ?? null,
               limitRecovery: null,
               ...(previousRun === undefined
@@ -3883,7 +3888,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       threadId: command.threadId,
       providerInstanceId: updatedThread.providerInstanceId,
       occurredAt: now,
-      payload: updatedThread,
+      payload: syncConversationTitle(updatedThread),
     });
     // Archiving ends the guest share, so its waiting files go too.
     yield* releaseGuestAttachments(command, thread.guestShare, updatedThread.guestShare, effects);
@@ -5330,14 +5335,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       userMessages.length > 0 && userMessages.every(isNativeMaintenanceCommand);
     if (
       projection.thread.conversations !== undefined &&
-      projection.runs.length === 0 &&
-      command.text.trim().length > 0
+      command.createdBy === "user" &&
+      !isNativeMaintenanceCommand(command) &&
+      (projection.runs.length === 0 || onlyMaintenanceHistory)
     ) {
       const now = yield* DateTime.now;
       const conversationId = threadConversationId(projection.thread);
-      const title = command.text.trim().replace(/\s+/gu, " ").slice(0, 80);
+      const title =
+        command.titleSeed ??
+        (command.text.trim().replace(/\s+/gu, " ").slice(0, 80) || projection.thread.title);
       const thread = {
         ...projection.thread,
+        title,
+        titleRegeneration: { requestId: command.commandId, startedAt: now },
         conversations: projection.thread.conversations.map((conversation) =>
           conversation.id === conversationId ? { ...conversation, title } : conversation,
         ),
@@ -5352,6 +5362,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: thread,
       });
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        pendingThreadTitleGenerationEffect(command.commandId, command.threadId, {
+          type: "initial",
+          messageId: command.messageId,
+        }),
+      ]);
       projection = { ...projection, thread };
     }
     if (
