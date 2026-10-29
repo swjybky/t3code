@@ -189,6 +189,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
       }),
     listActiveSubagentThreadIds: unused,
     listOlderSettledThreads: unused,
+    getProjectConversations: unused,
     readShellSnapshot: unused,
     ensureLegacyTranscript: unused,
     dispatch: unused,

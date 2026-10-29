@@ -24,6 +24,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShellSnapshot,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ProjectConversation,
   type OrchestrationV2ThreadTranscript,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
@@ -47,12 +48,14 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import type * as SqlClient from "effect/sql/SqlClient";
 
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { projectedRowEncodedBytes } from "./threadHistoryPaging.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ProjectConversations from "./ProjectConversations.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
@@ -412,6 +415,13 @@ export interface ThreadManagementServiceShape {
     readonly projectId: ProjectId;
     readonly includeSubagents: boolean;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadShell>, ThreadManagementError>;
+  readonly getProjectConversations: (
+    projectId: ProjectId,
+  ) => Effect.Effect<
+    ReadonlyArray<OrchestrationV2ProjectConversation>,
+    ThreadManagementProjectThreadsListError,
+    SqlClient.SqlClient
+  >;
   readonly sendToThread: (
     input: ThreadManagementSendInput,
   ) => Effect.Effect<ThreadManagementSendResult, ThreadManagementFailure>;
@@ -782,6 +792,15 @@ const make = Effect.gen(function* () {
           ),
       ),
     );
+
+  const getProjectConversations: ThreadManagementServiceShape["getProjectConversations"] =
+    Effect.fn("ThreadManagementService.getProjectConversations")(function (projectId) {
+      return ProjectConversations.list(projectId).pipe(
+        Effect.mapError(
+          (cause) => new ThreadManagementProjectThreadsListError({ projectId, cause }),
+        ),
+      );
+    });
 
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = Effect.fn(
     "ThreadManagementService.sendToThread",
@@ -1349,6 +1368,7 @@ const make = Effect.gen(function* () {
     readShellSnapshot: orchestrator.readShellSnapshot,
     getThreadShell: orchestrator.getThreadShell,
     listProjectThreads,
+    getProjectConversations,
     sendToThread,
     assertProviderInstanceEnabled,
     isProviderInstanceEnabledForProject,

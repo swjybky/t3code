@@ -1803,6 +1803,7 @@ export const layerWsRpc = (
           threadFind: true,
           threadFindProgressive: true,
           threadConversations: true,
+          projectConversations: true,
           ...Option.match(scratchWorkspaceRoot, {
             onNone: () => ({}),
             onSome: (root) => ({ scratchWorkspaceRoot: root }),
@@ -2035,6 +2036,17 @@ export const layerWsRpc = (
               (cause) =>
                 new OrchestrationV2GetShellSnapshotError({
                   message: "Failed to load older settled threads",
+                  cause,
+                }),
+            ),
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.getProjectConversations]: (input) =>
+          threadManagement.getProjectConversations(input.projectId).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2GetShellSnapshotError({
+                  message: "Failed to load project conversations",
                   cause,
                 }),
             ),

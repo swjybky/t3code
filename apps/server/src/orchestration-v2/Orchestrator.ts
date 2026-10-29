@@ -3201,14 +3201,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "对话已发生变化，请刷新后重试。",
         });
       }
-      if (change.type !== "restore" && conversationSwitchBlocked(projection)) {
+      const selectionUnchanged = change.type === "select" && change.conversationId === currentId;
+      if (
+        selectionUnchanged &&
+        command.title === undefined &&
+        command.regenerateTitle === undefined &&
+        command.branch === undefined &&
+        command.worktreePath === undefined &&
+        command.limitRecovery === undefined &&
+        command.linkedPullRequest === undefined
+      )
+        return;
+      if (
+        !selectionUnchanged &&
+        change.type !== "restore" &&
+        conversationSwitchBlocked(projection)
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: "请先停止或完成当前任务，再管理对话。",
         });
       }
-      if (isProviderNativeSubagentThread(thread) || thread.archivedAt !== null) {
+      if (
+        !selectionUnchanged &&
+        (isProviderNativeSubagentThread(thread) || thread.archivedAt !== null)
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -3270,7 +3288,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         conversationMatches(run, nextConversationId),
       );
       conversationChanges = {
-        conversations: nextConversations,
+        ...(selectionUnchanged ? {} : { conversations: nextConversations }),
         ...(nextConversationId === currentId
           ? {}
           : {
@@ -13088,7 +13106,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.background-work.settle" ||
           command.type === "thread.stop" ||
           command.type === "subagent.stop" ||
-          (command.type === "thread.metadata.update" && command.conversation?.type === "create") ||
+          (command.type === "thread.metadata.update" &&
+            (command.conversation?.type === "create" || command.conversation?.type === "select")) ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close",
         (_planned) =>

@@ -118,6 +118,39 @@ it.effect("creates independent conversations and restores the original provider 
       return run;
     });
     yield* send("original");
+    const activeBeforeSelection = yield* projections.getThreadSnapshot(threadId);
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("conversation:select-active-busy"),
+      threadId,
+      conversation: {
+        type: "select",
+        conversationId: "default",
+        expectedConversationId: "default",
+      },
+    });
+    assert.deepEqual(yield* projections.getThreadSnapshot(threadId), activeBeforeSelection);
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("conversation:select-active-with-metadata"),
+      threadId,
+      conversation: {
+        type: "select",
+        conversationId: "default",
+        expectedConversationId: "default",
+      },
+      branch: "feature/updated",
+    });
+    assert.equal(
+      (yield* projections.getThreadSnapshot(threadId)).projection.thread.branch,
+      "feature/updated",
+    );
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("conversation:restore-branch"),
+      threadId,
+      branch: "feature/conversations",
+    });
     const blocked = yield* orchestrator
       .dispatch({
         type: "thread.metadata.update",

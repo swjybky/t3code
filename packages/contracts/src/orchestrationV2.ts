@@ -3546,6 +3546,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getThreadFamily: "orchestration.getThreadFamily",
   getWorktreeThreadIds: "orchestration.getWorktreeThreadIds",
   getOlderSettledThreads: "orchestration.getOlderSettledThreads",
+  getProjectConversations: "orchestration.getProjectConversations",
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
   stopWorkflow: "orchestration.stopWorkflow",
@@ -3651,6 +3652,17 @@ export const OrchestrationV2GetThreadProjectionInput = Schema.Struct({
 });
 export type OrchestrationV2GetThreadProjectionInput =
   typeof OrchestrationV2GetThreadProjectionInput.Type;
+
+export const OrchestrationV2ProjectConversation = Schema.Struct({
+  threadId: ThreadId,
+  id: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+  activeConversationId: TrimmedNonEmptyString,
+  archived: Schema.Boolean,
+  manageable: Schema.Boolean,
+});
+export type OrchestrationV2ProjectConversation = typeof OrchestrationV2ProjectConversation.Type;
 
 export const OrchestrationV2SubscribeShellInput = Schema.Struct({
   afterSequence: Schema.optionalKey(NonNegativeInt),
@@ -4139,6 +4151,10 @@ export const OrchestrationV2RpcSchemas = {
   getOlderSettledThreads: {
     input: OrchestrationV2GetOlderSettledThreadsInput,
     output: OrchestrationV2OlderSettledThreadsPage,
+  },
+  getProjectConversations: {
+    input: Schema.Struct({ projectId: ProjectId }),
+    output: Schema.Array(OrchestrationV2ProjectConversation),
   },
   getThreadProjection: {
     input: OrchestrationV2GetThreadProjectionInput,
