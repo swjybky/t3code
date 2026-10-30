@@ -150,9 +150,6 @@ export default defineConfig({
         }
       : {}),
   },
-  staged: {
-    "*": "vp fmt --no-error-on-unmatched-pattern",
-  },
   fmt: {
     ignorePatterns: [
       ".repos/**",

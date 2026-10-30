@@ -12,6 +12,7 @@ import type {
 import {
   conversationMatches,
   projectConversation,
+  shellConversationFields,
   threadConversationId,
 } from "@t3tools/shared/threadConversations";
 import {
@@ -1675,6 +1676,7 @@ export function threadShellFromProjection(
     lineage: projection.thread.lineage,
     forkedFrom: projection.thread.forkedFrom,
     activeProviderThreadId: projection.thread.activeProviderThreadId,
+    ...shellConversationFields(projection.thread),
     ...(projection.thread.historyOrigin === undefined
       ? {}
       : { historyOrigin: projection.thread.historyOrigin }),
@@ -1957,6 +1959,7 @@ function shellFromState(input: {
     lineage: input.state.thread.lineage,
     forkedFrom: input.state.thread.forkedFrom,
     activeProviderThreadId: input.state.thread.activeProviderThreadId,
+    ...shellConversationFields(input.state.thread),
     ...(input.state.thread.historyOrigin === undefined
       ? {}
       : { historyOrigin: input.state.thread.historyOrigin }),

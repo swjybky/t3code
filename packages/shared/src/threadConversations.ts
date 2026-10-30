@@ -43,6 +43,15 @@ export function syncConversationTitle(thread: ConversationProjection["thread"]) 
   };
 }
 
+// Shells list conversations only for threads that have switched at least once.
+export function shellConversationFields(
+  thread: Pick<ConversationProjection["thread"], "activeConversationId" | "conversations">,
+) {
+  const live = thread.conversations?.filter((conversation) => conversation.deletedAt == null);
+  if (live === undefined || live.length < 2) return {};
+  return { activeConversationId: threadConversationId(thread), conversations: live };
+}
+
 export function conversationMatches(
   row: { readonly conversationId?: string | undefined },
   conversationId: string,
